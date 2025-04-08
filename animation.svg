@@ -1,0 +1,76 @@
+<svg viewBox="0 0 400 500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="faceGradient" cx="50%" cy="50%" r="60%" fx="40%" fy="40%">
+      <stop offset="0%" style="stop-color:#FFE0C4;stop-opacity:1" />
+      <stop offset="30%" style="stop-color:#F8DBC2;stop-opacity:1" />
+      <stop offset="60%" style="stop-color:#F0D0B6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E3C1A8;stop-opacity:1" />
+    </radialGradient>
+    <linearGradient id="neckGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#F5D5B6;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#E3C1A8;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#D1AD95;stop-opacity:1" />
+    </linearGradient>
+    <radialGradient id="hairGradient" cx="40%" cy="30%" r="50%" fx="40%" fy="20%">
+      <stop offset="0%" style="stop-color:#503010;stop-opacity:1" />
+      <stop offset="60%" style="stop-color:#382008;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#201004;stop-opacity:1" />
+    </radialGradient>
+    <radialGradient id="mouthGradient" cx="50%" cy="50%" r="70%" fx="50%" fy="50%">
+      <stop offset="0%" style="stop-color:#F7CECD;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E3A599;stop-opacity:1" />
+    </radialGradient>
+    <linearGradient id="leftEyebrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#382008;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#180802;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="rightEyebrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#382008;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#180802;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <ellipse cx="200" cy="230" rx="130" ry="160" fill="url(#faceGradient)" stroke="#B6977F" stroke-width="0.8" />
+
+  <path d="M160 380 Q200 420 240 380 L240 440 Q200 460 160 440 Z" fill="url(#neckGradient)" stroke="#B6977F" stroke-width="0.6" />
+
+  <path d="M50 220 Q100 50 200 70 Q300 50 350 220 Q320 150 290 190 Q350 90 200 80 Q50 90 110 190 Q80 150 50 220 Z" fill="url(#hairGradient)" stroke="#4C2E0F" stroke-width="0.6" />
+  <path d="M55 210 C45 190 50 170 60 155 C70 150 80 160 85 175 C90 190 80 210 75 220 Z" fill="#FFE0C4" stroke="#B6977F" stroke-width="0.6" />
+  <path d="M345 210 C355 190 350 170 340 155 C330 150 320 160 315 175 C310 190 320 210 325 220 Z" fill="#FFE0C4" stroke="#B6977F" stroke-width="0.6" />
+
+  <g id="eyes">
+    <ellipse cx="140" cy="200" rx="22" ry="16" fill="white" stroke="#B6977F" stroke-width="0.6" />
+    <ellipse cx="260" cy="200" rx="22" ry="16" fill="white" stroke="#B6977F" stroke-width="0.6" />
+
+    <circle cx="140" cy="200" r="11" fill="#5B84B1" />
+    <circle cx="260" cy="200" r="11" fill="#5B84B1" />
+
+    <circle cx="140" cy="200" r="5" fill="#21252A" />
+    <circle cx="260" cy="200" r="5" fill="#21252A" />
+
+    <circle cx="143" cy="197" r="2" fill="white" opacity="0.7" />
+    <circle cx="263" cy="197" r="2" fill="white" opacity="0.7" />
+  </g>
+
+  <path d="M115 175 Q140 165 165 175" fill="none" stroke="url(#leftEyebrowGradient)" stroke-width="2.2" stroke-linecap="round" />
+  <path d="M235 175 Q260 165 285 175" fill="none" stroke="url(#rightEyebrowGradient)" stroke-width="2.2" stroke-linecap="round" />
+
+  <path d="M190 230 Q200 240 200 260 Q200 270 210 270" fill="none" stroke="#B6977F" stroke-width="1.2" stroke-linecap="round" />
+
+  <g id="mouth-base">
+    <ellipse cx="200" cy="310" rx="40" ry="12" fill="url(#mouthGradient)" />
+
+    <path d="M155 310 Q200 320 245 310 Q200 335 155 310" fill="#E3A599" stroke="#CA8B7F" stroke-width="0.6" />
+    <path d="M155 310 Q200 300 245 310" fill="none" stroke="#CA8B7F" stroke-width="0.6" />
+  </g>
+
+  <g id="teeth" opacity="0">
+    <rect x="165" y="305" width="70" height="8" rx="2" fill="white" stroke="#EEEEEE" stroke-width="0.5" />
+  </g>
+
+  <g id="mouth-states">
+    <path id="mouth-closed" d="M170 310 Q200 313 230 310" fill="none" stroke="#9F5F59" stroke-width="1.2" />
+
+    <ellipse id="mouth-open" cx="200" cy="313" rx="30" ry="18" fill="#5D180E" opacity="0" />
+  </g>
+</svg>
