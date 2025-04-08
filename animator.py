@@ -7,7 +7,7 @@ from viseme_mapper import VisemeMapper
 
 
 class LipSyncAnimator:
-    def __init__(self, width=800, height=600):
+    def __init__(self, width=800, height=600, transition_time=0.1):
         # Initialize pygame
         pygame.init()
         pygame.mixer.init()
@@ -27,9 +27,7 @@ class LipSyncAnimator:
         self.face_radius = 120
         self.mouth_base_y = self.face_center[1] + 20
         self.mouth_base_width = 80
-        self.transition_time = 0.05  # seconds for blending between visemes
-
-        # Colors
+        self.transition_time = transition_time  # Configurable transition time
         self.bg_color = (240, 240, 240)
         self.face_color = (255, 220, 200)
         self.outline_color = (0, 0, 0)
