@@ -87,6 +87,7 @@ class VisemeMapper:
         Returns:
         - List of (viseme_name, viseme_params, start_time, end_time) tuples
         """
+
         viseme_sequence = []
 
         for phoneme, start_time, end_time in phoneme_timings:
