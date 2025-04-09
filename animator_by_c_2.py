@@ -1,4 +1,3 @@
-
 import re
 from collections import namedtuple
 import urllib.request

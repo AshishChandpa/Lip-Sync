@@ -78,7 +78,7 @@ class RealisticLipSyncAnimator:
     def load_facial_assets(self):
         """Load or create assets for facial features."""
         try:
-            self.avatar_svg_original = load_svg_asset("animation.svg")
+            self.avatar_svg_original = load_svg_asset("animation_1.svg")
             self.avatar_svg = self.avatar_svg_original.copy()
         except Exception as e:
             print(f"Error loading SVG asset: {e}")
@@ -275,25 +275,33 @@ class RealisticLipSyncAnimator:
         return mouth_surf
 
     def update_blink(self, delta_time):
-        """Update blinking animation"""
+        """
+        Update the blinking animation by checking if it's time to blink.
+        """
         self.blink_timer += delta_time
         if self.is_blinking:
+            # If currently blinking, check if the blink duration has passed
             if self.blink_timer >= self.blink_duration:
                 self.is_blinking = False
                 self.blink_timer = 0
+                # Set a new random time until the next blink (e.g., between 2-5 seconds)
                 self.next_blink = np.random.uniform(2.0, 5.0)
         else:
+            # If not blinking, check if it's time to start a blink
             if self.blink_timer >= self.next_blink:
                 self.is_blinking = True
                 self.blink_timer = 0
 
     def update_idle_animation(self, delta_time):
-        """Update subtle idle animations for realism"""
+        """
+        Update idle animations (like subtle head sway or breathing).
+        Returns offsets to be added to the face's center.
+        """
         self.idle_timer += delta_time
-        breath = math.sin(self.idle_timer * 0.5) * 2
-        self.idle_offset_x = math.sin(self.idle_timer * 0.3) * 2
-        self.idle_offset_y = breath
-        return self.idle_offset_x, self.idle_offset_y
+        # Example: a gentle left-right sway and up-down breathing effect
+        idle_offset_x = math.sin(self.idle_timer * 0.5) * 3  # Sway horizontally
+        idle_offset_y = math.sin(self.idle_timer * 0.3) * 2  # Sway vertically (breathing)
+        return idle_offset_x, idle_offset_y
 
     def draw_eye(screen, center_x, center_y, size, is_left):
         """Draws a more realistic eye."""
@@ -344,7 +352,7 @@ class RealisticLipSyncAnimator:
 
         # Generate the animated mouth surface based on current viseme parameters.
         mouth_surf = self.generate_mouth_surface(mouth_params)
-
+        self.update_blink(delta_time)
         # Determine the mouth's position relative to the face.
         # (For example, if your SVG was designed with a mouth center around (200, 310) in a 400x500 view,
         # then relative to the SVG's center, the mouth offset might be roughly (0, 60).)
