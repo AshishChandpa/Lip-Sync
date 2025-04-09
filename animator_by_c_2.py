@@ -9,18 +9,13 @@ import pygame
 import numpy as np
 import time
 import os
+import math
 from scipy.ndimage import gaussian_filter1d
 
-# Define viseme shapes more precisely
+# Define viseme shapes more precisely using the same structure as in animator.py
 VisemeShape = namedtuple('VisemeShape', ['jaw_open', 'lip_round', 'lip_width', 'tongue_visible', 'teeth_visible'])
-# At the beginning of your animator.py file, add:
-import dlib
-import os
-import urllib.request
-import bz2
 
 
-# Download shape predictor if missing
 def download_shape_predictor(predictor_path):
     """Download and decompress the dlib shape predictor file."""
     url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
@@ -44,27 +39,6 @@ if not os.path.exists(predictor_path):
     download_shape_predictor(predictor_path)
 
 
-# --------------- Utility: Download Shape Predictor if Missing ---------------
-def download_shape_predictor(predictor_path):
-    """
-    Download and decompress the dlib shape predictor file.
-    """
-    url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-    compressed_file = predictor_path + ".bz2"
-    try:
-        print("Downloading shape_predictor_68_face_landmarks.dat (this may take a while)...")
-        urllib.request.urlretrieve(url, compressed_file)
-        print("Download complete. Decompressing...")
-        with bz2.BZ2File(compressed_file, 'rb') as f_in:
-            with open(predictor_path, 'wb') as f_out:
-                f_out.write(f_in.read())
-        os.remove(compressed_file)
-        print("Decompression complete. Predictor ready.")
-    except Exception as e:
-        print("Error downloading shape predictor:", e)
-
-
-# --------------- Utility: Compute Mouth Aspect Ratio (MAR) ---------------
 def mouth_aspect_ratio(mouth_points):
     """
     Compute the Mouth Aspect Ratio (MAR) using inner mouth landmarks.
@@ -80,221 +54,6 @@ def mouth_aspect_ratio(mouth_points):
         return 0.2
 
 
-# --------------- PhonemeAnalyzer Class ---------------
-class PhonemeAnalyzer:
-    def __init__(self):
-        # Sample phoneme dictionary (can be expanded using CMU Pronouncing Dictionary)
-        self.phoneme_dict = {
-            "hello": ["HH", "AH", "L", "OW"],
-            "world": ["W", "ER", "L", "D"],
-            "and": ["AE", "N", "D"],
-            "the": ["DH", "AH"],
-            "is": ["IH", "Z"],
-            "it": ["IH", "T"],
-            "for": ["F", "AO", "R"],
-            "this": ["DH", "IH", "S"],
-            "from": ["F", "R", "AH", "M"],
-            "to": ["T", "UW"],
-            "a": ["AH"],
-            "with": ["W", "IH", "TH"],
-            # Add more words as needed
-        }
-
-        # Typical durations (in seconds) for different phoneme types
-        self.phoneme_durations = {
-            # Vowels generally last longer
-            "AA": 0.12, "AE": 0.12, "AH": 0.10, "AO": 0.12, "AW": 0.15,
-            "AY": 0.15, "EH": 0.10, "ER": 0.15, "EY": 0.15, "IH": 0.08,
-            "IY": 0.10, "OW": 0.12, "OY": 0.15, "UH": 0.08, "UW": 0.10,
-
-            # Consonants are shorter
-            "B": 0.06, "CH": 0.08, "D": 0.06, "DH": 0.07, "F": 0.08,
-            "G": 0.06, "HH": 0.07, "JH": 0.08, "K": 0.06, "L": 0.08,
-            "M": 0.07, "N": 0.07, "NG": 0.09, "P": 0.05, "R": 0.07,
-            "S": 0.09, "SH": 0.09, "T": 0.05, "TH": 0.08, "V": 0.07,
-            "W": 0.07, "Y": 0.07, "Z": 0.09, "ZH": 0.09
-        }
-
-        # Default duration for unknown phonemes
-        self.default_duration = 0.08
-
-    def analyze_text(self, text, estimate_duration=True, duration=None):
-        """
-        Analyze text and generate phoneme timings without audio
-        """
-        # Get phoneme sequence from transcript
-        phonemes = self.get_phoneme_sequence(text)
-
-        if not phonemes:
-            print("Error: No phonemes generated from text")
-            return []
-
-        # Estimate total duration if not provided
-        if duration is None:
-            if estimate_duration:
-                # Estimate based on phoneme durations (average speaking rate)
-                total_duration = sum(self.phoneme_durations.get(p, self.default_duration) for p in phonemes)
-                # Apply a speaking rate factor (adjust as needed)
-                speaking_rate_factor = 1.2
-                audio_duration = total_duration * speaking_rate_factor
-            else:
-                # Default duration if not estimating
-                audio_duration = len(phonemes) * 0.1  # 100ms per phoneme as fallback
-        else:
-            audio_duration = duration
-
-        # Generate weighted timings
-        phoneme_timings = self.assign_timings_weighted(phonemes, audio_duration)
-
-        return phoneme_timings
-
-    def get_phoneme_sequence(self, text):
-        """Convert text into a sequence of phonemes"""
-        words = re.findall(r'\b\w+\b', text.lower())
-        phonemes = []
-
-        for word in words:
-            if word in self.phoneme_dict:
-                phonemes.extend(self.phoneme_dict[word])
-            else:
-                # For unknown words, use a simple approximation
-                print(f"Warning: Word '{word}' not in phoneme dictionary")
-                for char in word:
-                    if char in 'aeiou':
-                        phonemes.append("AH")  # Default vowel sound
-                    else:
-                        phonemes.append(char.upper())  # Use character as phoneme
-
-        return phonemes
-
-    def assign_timings_weighted(self, phonemes, audio_duration):
-        """Assign timings based on typical phoneme durations"""
-        # Calculate total relative duration
-        total_relative = sum(self.phoneme_durations.get(p, self.default_duration) for p in phonemes)
-
-        # Scale factor to fit into audio duration
-        scale = audio_duration / total_relative if total_relative > 0 else 1.0
-
-        timings = []
-        current_time = 0
-
-        for phoneme in phonemes:
-            duration = self.phoneme_durations.get(phoneme, self.default_duration) * scale
-            timings.append((phoneme, current_time, current_time + duration))
-            current_time += duration
-
-        return timings
-
-
-# --------------- VisemeMapper Class ---------------
-class VisemeMapper:
-    def __init__(self):
-        """
-        Initialize the mapper with phoneme-to-viseme mappings
-        Viseme parameters are given as (jaw_open, lip_round, lip_width)
-        """
-        # Basic viseme parameters: (jaw_open, lip_round, lip_width)
-        self.viseme_params = {
-            "REST": (0.0, 0.0, 0.5),  # Neutral closed mouth
-            "A": (0.7, 0.0, 0.7),  # Open mouth as in "car", "hat"
-            "E": (0.5, 0.2, 0.7),  # Wide mouth as in "bed", "yes"
-            "I": (0.3, 0.0, 0.8),  # Slight open mouth as in "sit", "bit"
-            "O": (0.5, 0.8, 0.6),  # Rounded mouth as in "go", "boat"
-            "U": (0.3, 0.8, 0.4),  # Pursed lips as in "blue", "tube"
-            "F": (0.1, 0.5, 0.7),  # Lower lip touching upper teeth as in "far", "van"
-            "P": (0.0, 0.0, 0.5),  # Closed lips as in "put", "but"
-            "L": (0.3, 0.0, 0.6),  # Tongue tip up as in "lot", "doll"
-            "S": (0.2, 0.4, 0.7),  # Teeth closed, slight open as in "sit", "this"
-        }
-
-        # Mapping from phonemes to visemes
-        self.phoneme_to_viseme = {
-            # Vowels
-            "AA": "A",  # "father"
-            "AE": "A",  # "cat"
-            "AH": "A",  # "hut"
-            "AO": "O",  # "dog"
-            "AW": "A",  # "cow"
-            "AY": "A",  # "hide"
-            "EH": "E",  # "pet"
-            "ER": "E",  # "fur"
-            "EY": "E",  # "ate"
-            "IH": "I",  # "sit"
-            "IY": "I",  # "eat"
-            "OW": "O",  # "boat"
-            "OY": "O",  # "toy"
-            "UH": "U",  # "book"
-            "UW": "U",  # "boot"
-
-            # Consonants
-            "B": "P",  # "buy"
-            "CH": "S",  # "church"
-            "D": "L",  # "day"
-            "DH": "L",  # "this"
-            "F": "F",  # "for"
-            "G": "P",  # "go"
-            "HH": "REST",  # "help"
-            "JH": "S",  # "judge"
-            "K": "P",  # "key"
-            "L": "L",  # "lay"
-            "M": "P",  # "me"
-            "N": "L",  # "no"
-            "NG": "L",  # "sing"
-            "P": "P",  # "put"
-            "R": "L",  # "run"
-            "S": "S",  # "see"
-            "SH": "S",  # "she"
-            "T": "L",  # "take"
-            "TH": "F",  # "thin"
-            "V": "F",  # "very"
-            "W": "U",  # "way"
-            "Y": "I",  # "yes"
-            "Z": "S",  # "zoo"
-            "ZH": "S",  # "measure"
-        }
-
-        # Default transition time (in seconds) between visemes
-        self.transition_time = 0.05
-
-    def get_viseme_for_phoneme(self, phoneme):
-        """Convert phoneme to viseme name and parameters"""
-        if phoneme in self.phoneme_to_viseme:
-            viseme_name = self.phoneme_to_viseme[phoneme]
-            return viseme_name, self.viseme_params[viseme_name]
-        else:
-            # Return REST viseme for unknown phonemes
-            return "REST", self.viseme_params["REST"]
-
-    def map_to_viseme_sequence(self, phoneme_timings):
-        """
-        Map phoneme timings to viseme sequence
-
-        Parameters:
-        - phoneme_timings: List of (phoneme, start_time, end_time) tuples
-
-        Returns:
-        - List of (viseme_name, viseme_params, start_time, end_time) tuples
-        """
-        viseme_sequence = []
-
-        for phoneme, start_time, end_time in phoneme_timings:
-            viseme_name, viseme_params = self.get_viseme_for_phoneme(phoneme)
-            viseme_sequence.append((viseme_name, viseme_params, start_time, end_time))
-
-        # Add REST visemes at start and end if needed
-        if viseme_sequence and viseme_sequence[0][2] > 0:
-            # Add REST at start
-            viseme_sequence.insert(0, ("REST", self.viseme_params["REST"], 0, viseme_sequence[0][2]))
-
-        # Add final REST if the sequence isn't empty
-        if viseme_sequence:
-            last_end = viseme_sequence[-1][3]
-            viseme_sequence.append(("REST", self.viseme_params["REST"], last_end, last_end + 0.5))
-
-        return viseme_sequence
-
-
-# Add this class before the RealisticLipSyncAnimator class
 class VideoMouthExtractor:
     def __init__(self):
         # Initialize dlib's detector and predictor
@@ -434,6 +193,7 @@ class VideoMouthExtractor:
     def map_mar_to_viseme(self, mar):
         """
         Map the MAR value to a discrete viseme label and a corresponding warp factor.
+        Using improved mapping from animator.py
         """
         if mar < 0.25:
             return "REST", 1.0
@@ -444,7 +204,7 @@ class VideoMouthExtractor:
         elif mar < 0.48:
             return "O", 1.8
         else:
-            return "A", 2.2
+            return "Wide", 2.2
 
     def get_frame(self, frame_idx, is_silence=False):
         """
@@ -456,44 +216,7 @@ class VideoMouthExtractor:
         return frames[frame_idx]
 
 
-# --------------- RealisticLipSyncAnimator Class ---------------
 class RealisticLipSyncAnimator:
-    # def __init__(self, width=800, height=600, transition_time=0.05):
-    #     # Initialize pygame
-    #     pygame.init()
-    #     pygame.mixer.init()
-    #
-    #     # Setup display
-    #     self.width = width
-    #     self.height = height
-    #     self.screen = pygame.display.set_mode((width, height))
-    #     pygame.display.set_caption("Realistic Lip Sync Animation")
-    #
-    #     # Setup clock
-    #     self.clock = pygame.time.Clock()
-    #     self.fps = 60
-    #
-    #     # Animation parameters
-    #     self.bg_color = (240, 240, 240)
-    #     self.transition_time = transition_time
-    #
-    #     # Initialize the phoneme analyzer and viseme mapper from the original codebase
-    #     self.phoneme_analyzer = PhonemeAnalyzer()
-    #     self.viseme_mapper = VisemeMapper()
-    #
-    #     # Initialize video extractor
-    #     self.video_extractor = VideoMouthExtractor()
-    #
-    #     # Silence threshold for audio analysis
-    #     self.silence_threshold = 0.15  # Reduced from default 0.21
-    #
-    #     # Storage for mouth data
-    #     self.speaking_mouth_data = None
-    #     self.silence_mouth_data = None
-    #
-    #     # Viseme sequence from script
-    #     self.viseme_sequence = None
-
     def __init__(self, width=800, height=600):
         # Initialize pygame
         pygame.init()
@@ -513,6 +236,9 @@ class RealisticLipSyncAnimator:
         self.bg_color = (0, 0, 0)  # Black background
         self.silence_threshold = 0.21  # Threshold for detecting silence in audio
 
+        # Improved transition time for smoother viseme changes (from animator.py)
+        self.transition_time = 0.08  # Faster transitions for realism
+
         # Video processing
         self.video_extractor = VideoMouthExtractor()
         self.speaking_mouth_data = []
@@ -524,12 +250,83 @@ class RealisticLipSyncAnimator:
         self.phoneme_analyzer = PhonemeAnalyzer()
         self.viseme_mapper = VisemeMapper()
         self.viseme_sequence = None
-        self.transition_time = 0.05  # Transition time between visemes
+
+        # Enhanced viseme map with more detailed parameters (from animator.py)
+        self.viseme_map = {
+            "REST": VisemeShape(0.0, 0.0, 0.5, False, False),  # Neutral closed mouth
+            "A": VisemeShape(0.7, 0.0, 0.7, True, True),  # Wide open "ah" sound
+            "E": VisemeShape(0.5, 0.0, 0.8, False, True),  # "eh" as in "bed"
+            "I": VisemeShape(0.3, 0.2, 0.7, False, True),  # "ee" as in "see"
+            "O": VisemeShape(0.5, 0.8, 0.6, False, True),  # Round "oh" sound
+            "U": VisemeShape(0.3, 0.9, 0.4, False, False),  # Tight "oo" sound
+            "F": VisemeShape(0.1, 0.5, 0.8, False, True),  # "f" and "v" sounds
+            "M": VisemeShape(0.0, 0.5, 0.5, False, False),  # Closed lips for "m", "b", "p"
+            "L": VisemeShape(0.3, 0.0, 0.6, True, True),  # Tongue visible for "l"
+            "S": VisemeShape(0.2, 0.3, 0.7, False, True),  # "s", "z" sounds
+            "T": VisemeShape(0.2, 0.0, 0.7, True, True),  # "t", "d", "n" sounds
+            "SH": VisemeShape(0.2, 0.7, 0.5, False, True),  # "sh", "ch", "j" sounds
+            "Wide": VisemeShape(0.7, 0.0, 0.8, True, True),  # Extra wide open mouth
+            "Slight": VisemeShape(0.3, 0.0, 0.6, False, True),  # Slightly open mouth
+        }
+
+        # Blinking parameters (from animator.py)
+        self.blink_timer = 0
+        self.next_blink = np.random.uniform(2.0, 5.0)  # Random blink interval
+        self.is_blinking = False
+        self.blink_duration = 0.15  # Blink lasts 0.15 seconds
+
+        # Idle animation parameters (from animator.py)
+        self.idle_offset_x = 0
+        self.idle_offset_y = 0
+        self.idle_timer = 0
+
+    def interpolate_viseme_params(self, shape1, shape2, blend):
+        """
+        Interpolate between two viseme shapes for smoother transitions.
+        Taken from animator.py
+        """
+        return VisemeShape(
+            shape1.jaw_open * (1 - blend) + shape2.jaw_open * blend,
+            shape1.lip_round * (1 - blend) + shape2.lip_round * blend,
+            shape1.lip_width * (1 - blend) + shape2.lip_width * blend,
+            shape2.tongue_visible if blend > 0.5 else shape1.tongue_visible,
+            shape2.teeth_visible if blend > 0.5 else shape1.teeth_visible
+        )
+
+    def update_blink(self, delta_time):
+        """
+        Update the blinking animation by checking if it's time to blink.
+        Taken from animator.py
+        """
+        self.blink_timer += delta_time
+        if self.is_blinking:
+            # If currently blinking, check if the blink duration has passed
+            if self.blink_timer >= self.blink_duration:
+                self.is_blinking = False
+                self.blink_timer = 0
+                # Set a new random time until the next blink
+                self.next_blink = np.random.uniform(2.0, 5.0)
+        else:
+            # If not blinking, check if it's time to start a blink
+            if self.blink_timer >= self.next_blink:
+                self.is_blinking = True
+                self.blink_timer = 0
+
+    def update_idle_animation(self, delta_time):
+        """
+        Update idle animations (like subtle head sway or breathing).
+        Taken from animator.py
+        """
+        self.idle_timer += delta_time
+        # Example: a gentle left-right sway and up-down breathing effect
+        idle_offset_x = math.sin(self.idle_timer * 0.5) * 3  # Sway horizontally
+        idle_offset_y = math.sin(self.idle_timer * 0.3) * 2  # Sway vertically (breathing)
+        return idle_offset_x, idle_offset_y
 
     def process_frame_with_viseme(self, frame, viseme_name, viseme_params):
         """
         Process a frame to apply the viseme parameters to the mouth region.
-        Uses the viseme parameters from the VisemeMapper class.
+        Enhanced with more detailed viseme parameters from animator.py
         """
         frame_copy = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -555,8 +352,15 @@ class RealisticLipSyncAnimator:
             bottom = min(frame.shape[0], bottom + padding)
             mouth_rect = (left, top, right - left, bottom - top)
 
-            # Extract jaw_open, lip_round, lip_width from viseme_params
+            # Extract parameters from viseme_params
             jaw_open, lip_round, lip_width = viseme_params
+
+            # Get tongue and teeth visibility from viseme map if available
+            tongue_visible = False
+            teeth_visible = False
+            if viseme_name in self.viseme_map:
+                tongue_visible = self.viseme_map[viseme_name].tongue_visible
+                teeth_visible = self.viseme_map[viseme_name].teeth_visible
 
             # Extract the mouth region
             mouth_roi = frame[top:bottom, left:right]
@@ -652,163 +456,184 @@ class RealisticLipSyncAnimator:
             print(f"Error analyzing audio: {e}")
             return None
 
-    def get_current_viseme(self, viseme_sequence, current_time):
+    def get_current_viseme_params(self, viseme_sequence, current_time):
         """
-        Get the current viseme based on time from the viseme sequence.
-        Handles transitions between visemes.
+        Get the current viseme parameters based on time.
+        Handles transitions between visemes for smoother animation.
+        Based on the implementation in animator.py
         """
         if not viseme_sequence:
-            return "REST", self.viseme_mapper.viseme_params["REST"]
+            return self.viseme_map["REST"]
 
-        # Find the current viseme segment
-        current_viseme = None
-        for viseme_name, viseme_params, start_time, end_time in viseme_sequence:
-            if start_time <= current_time < end_time:
-                current_viseme = (viseme_name, viseme_params)
+        current_viseme_idx = None
+        for i, (viseme_name, viseme_params, start, end) in enumerate(viseme_sequence):
+            if start <= current_time < end:
+                current_viseme_idx = i
                 break
 
-        # If no current viseme found, use the first or last one depending on time
-        if current_viseme is None:
+        if current_viseme_idx is None:
             if current_time < viseme_sequence[0][2]:
-                current_viseme = (viseme_sequence[0][0], viseme_sequence[0][1])
+                return self.viseme_map[viseme_sequence[0][0]]
+            elif current_time >= viseme_sequence[-1][3]:
+                return self.viseme_map[viseme_sequence[-1][0]]
             else:
-                current_viseme = (viseme_sequence[-1][0], viseme_sequence[-1][1])
+                return self.viseme_map["REST"]
 
-        return current_viseme
+        current_viseme, current_params, start, end = viseme_sequence[current_viseme_idx]
 
-    def get_mouth_data_for_frame(self, frame_idx, current_time, audio_mar=None):
-        """
-        Get mouth data for a specific frame index.
-        Uses speaking video data when audio is active, silence video data otherwise.
-        If viseme_sequence is provided, it overrides the viseme selection.
-        """
-        # IMPORTANT FIX: Lower the silence threshold to ensure more frames are classified as speech
-        self.silence_threshold = 0.15  # Reduced from 0.21
-
-        # Default to speaking unless explicitly determined to be silence
-        use_silence = False
-
-        # Check if we have a viseme sequence from the script
-        if self.viseme_sequence:
-            # Find the current viseme based on time
-            current_viseme = None
-            for viseme_name, viseme_params, start_time, end_time in self.viseme_sequence:
-                if start_time <= current_time < end_time:
-                    current_viseme = (viseme_name, viseme_params)
-                    break
-
-            # If we found a current viseme, use it to determine if we should show speaking
-            if current_viseme:
-                viseme_name, _ = current_viseme
-                # Only use silence for REST viseme, otherwise use speaking
-                use_silence = (viseme_name == "REST")
-        # If no viseme sequence or no current viseme found, fall back to audio analysis
-        elif audio_mar is not None:
-            use_silence = (audio_mar < self.silence_threshold)
-
-        # IMPORTANT: Force speaking frames for the first few seconds to debug
-        if current_time < 5.0:
-            use_silence = False
-
-        # Find the closest frame in the appropriate dataset
-        if use_silence and self.silence_mouth_data:
-            # Use silence data
-            closest_idx = min(range(len(self.silence_mouth_data)),
-                              key=lambda i: abs(
-                                  self.silence_mouth_data[i][0] - frame_idx % len(self.silence_mouth_data)))
-            return self.silence_mouth_data[closest_idx], True
-        elif self.speaking_mouth_data:
-            # Use speaking data
-            closest_idx = min(range(len(self.speaking_mouth_data)),
-                              key=lambda i: abs(
-                                  self.speaking_mouth_data[i][0] - frame_idx % len(self.speaking_mouth_data)))
-            return self.speaking_mouth_data[closest_idx], False
+        # Get the viseme shape from our map
+        if current_viseme in self.viseme_map:
+            current_shape = self.viseme_map[current_viseme]
         else:
-            # Fallback if no data is available
-            return (frame_idx, 0.2, None, "REST", 1.0), False
+            # Fallback to the provided parameters
+            current_shape = VisemeShape(current_params[0], current_params[1], current_params[2], False, False)
 
-    def process_videos(self, speaking_video_path, silence_video_path):
+        # Transition to next viseme if near the end of the segment
+        if (current_viseme_idx < len(viseme_sequence) - 1 and
+                current_time >= end - self.transition_time):
+            next_viseme = viseme_sequence[current_viseme_idx + 1][0]
+            next_shape = self.viseme_map.get(next_viseme,
+                                             VisemeShape(viseme_sequence[current_viseme_idx + 1][1][0],
+                                                         viseme_sequence[current_viseme_idx + 1][1][1],
+                                                         viseme_sequence[current_viseme_idx + 1][1][2],
+                                                         False, False))
+
+            blend = (current_time - (end - self.transition_time)) / self.transition_time
+            blend = max(0, min(1, blend))
+            return self.interpolate_viseme_params(current_shape, next_shape, blend)
+
+        # Transition from previous viseme if near the start of the segment
+        elif current_time <= start + self.transition_time and current_viseme_idx > 0:
+            prev_viseme = viseme_sequence[current_viseme_idx - 1][0]
+            prev_shape = self.viseme_map.get(prev_viseme,
+                                             VisemeShape(viseme_sequence[current_viseme_idx - 1][1][0],
+                                                         viseme_sequence[current_viseme_idx - 1][1][1],
+                                                         viseme_sequence[current_viseme_idx - 1][1][2],
+                                                         False, False))
+
+            blend = 1 - (current_time - start) / self.transition_time
+            blend = max(0, min(1, blend))
+            return self.interpolate_viseme_params(current_shape, prev_shape, blend)
+
+        return current_shape
+
+    def map_phonemes_to_visemes(self, phoneme_sequence):
         """
-        Process both speaking and silence videos to extract mouth data.
+        Map phoneme sequence to viseme sequence.
+        Using the improved mapping from animator.py
         """
-        print("Processing speaking video...")
-        speaking_data = self.video_extractor.extract_mouth_data_from_video(speaking_video_path, False)
-        if not speaking_data:
-            print("Warning: No mouth data extracted from speaking video")
-        self.speaking_mouth_data = speaking_data
+        phoneme_to_viseme = {
+            'AA': 'A', 'AE': 'A', 'AH': 'A',
+            'AO': 'O', 'AW': 'A', 'AY': 'A',
+            'EH': 'E', 'ER': 'E', 'EY': 'E',
+            'IH': 'I', 'IY': 'I',
+            'OW': 'O', 'OY': 'O',
+            'UH': 'U', 'UW': 'U',
+            'B': 'M', 'CH': 'SH', 'D': 'T', 'DH': 'T',
+            'F': 'F', 'G': 'T', 'HH': 'REST', 'JH': 'SH',
+            'K': 'T', 'L': 'L', 'M': 'M', 'N': 'T',
+            'NG': 'T', 'P': 'M', 'R': 'L', 'S': 'S',
+            'SH': 'SH', 'T': 'T', 'TH': 'T', 'V': 'F',
+            'W': 'U', 'Y': 'I', 'Z': 'S', 'ZH': 'SH',
+            'SIL': 'REST', 'SP': 'REST', 'SPX': 'REST', '': 'REST'
+        }
 
-        print("Processing silence video...")
-        silence_data = self.video_extractor.extract_mouth_data_from_video(silence_video_path, True)
-        if not silence_data:
-            print("Warning: No mouth data extracted from silence video")
-        self.silence_mouth_data = silence_data
-
-        print("Video processing complete.")
-
-        # Make sure we have at least some data to work with
-        has_speaking_data = len(self.speaking_mouth_data) > 0 if self.speaking_mouth_data else False
-        has_silence_data = len(self.silence_mouth_data) > 0 if self.silence_mouth_data else False
-
-        if not has_speaking_data:
-            print("Error: No mouth data available from speaking video")
-        if not has_silence_data:
-            print("Error: No mouth data available from silence video")
-
-        return has_speaking_data and has_silence_data
+        viseme_sequence = []
+        for phoneme, start, end in phoneme_sequence:
+            viseme = phoneme_to_viseme.get(phoneme, 'REST')
+            viseme_params = self.viseme_map.get(viseme, self.viseme_map['REST'])
+            viseme_sequence.append(
+                (viseme, (viseme_params.jaw_open, viseme_params.lip_round, viseme_params.lip_width), start, end))
+        return viseme_sequence
 
     def generate_viseme_sequence_from_text(self, text, duration=None):
         """
         Generate a viseme sequence from text.
         If duration is provided, it will be used as the total duration of the sequence.
+        Enhanced with better phoneme-to-viseme mapping.
         """
         print(f"Generating viseme sequence from text: '{text}'")
+
         # Use the PhonemeAnalyzer to convert text to phoneme timings
         phoneme_timings = self.phoneme_analyzer.analyze_text(text, estimate_duration=True, duration=duration)
+
+        # Check if we got valid phoneme timings
+        if not phoneme_timings:
+            print("Warning: No phoneme timings generated. Creating a default sequence.")
+            # Create a default sequence if no phonemes were generated
+            if duration is None:
+                duration = 5.0  # Default duration if none provided
+
+            # Create a simple default sequence
+            return [
+                ("REST", (
+                self.viseme_map["REST"].jaw_open, self.viseme_map["REST"].lip_round, self.viseme_map["REST"].lip_width),
+                 0.0, 0.5),
+                ("A", (self.viseme_map["A"].jaw_open, self.viseme_map["A"].lip_round, self.viseme_map["A"].lip_width),
+                 0.5, 1.0),
+                ("E", (self.viseme_map["E"].jaw_open, self.viseme_map["E"].lip_round, self.viseme_map["E"].lip_width),
+                 1.0, 1.5),
+                ("I", (self.viseme_map["I"].jaw_open, self.viseme_map["I"].lip_round, self.viseme_map["I"].lip_width),
+                 1.5, 2.0),
+                ("O", (self.viseme_map["O"].jaw_open, self.viseme_map["O"].lip_round, self.viseme_map["O"].lip_width),
+                 2.0, 2.5),
+                ("U", (self.viseme_map["U"].jaw_open, self.viseme_map["U"].lip_round, self.viseme_map["U"].lip_width),
+                 2.5, 3.0),
+                ("REST", (
+                self.viseme_map["REST"].jaw_open, self.viseme_map["REST"].lip_round, self.viseme_map["REST"].lip_width),
+                 3.0, duration)
+            ]
 
         # Debug: print phoneme timings
         print("Phoneme timings:")
         for phoneme, start, end in phoneme_timings:
             print(f"{phoneme}: {start:.2f}s - {end:.2f}s")
 
-        # Use the VisemeMapper to convert phoneme timings to viseme sequence
-        viseme_sequence = self.viseme_mapper.map_to_viseme_sequence(phoneme_timings)
+        # Use the improved mapping to convert phoneme timings to viseme sequence
+        viseme_sequence = self.map_phonemes_to_visemes(phoneme_timings)
 
         # Debug: print viseme sequence
         print("Viseme sequence:")
         for viseme_name, viseme_params, start, end in viseme_sequence:
             print(f"{viseme_name}: {start:.2f}s - {end:.2f}s, Params: {viseme_params}")
 
-        return viseme_sequence
+        # Ensure we have non-REST visemes in our sequence
+        has_speech = False
+        for viseme_name, _, _, _ in viseme_sequence:
+            if viseme_name != "REST":
+                has_speech = True
+                break
 
-        # # IMPORTANT: Make sure we have non-REST visemes in our sequence
-        # has_speech = False
-        # for viseme_name, _, _, _ in viseme_sequence:
-        #     if viseme_name != "REST":
-        #         has_speech = True
-        #         break
-        #
-        # if not has_speech:
-        #     print("WARNING: No speech visemes found in the sequence! Forcing some speech visemes.")
-        #     # Force some speech visemes if none were generated
-        #     if duration and duration > 1.0:
-        #         # Add a simple A-E-I-O-U sequence
-        #         viseme_sequence = [
-        #             ("REST", self.viseme_mapper.viseme_params["REST"], 0.0, 0.5),
-        #             ("A", self.viseme_mapper.viseme_params["A"], 0.5, 1.0),
-        #             ("E", self.viseme_mapper.viseme_params["E"], 1.0, 1.5),
-        #             ("I", self.viseme_mapper.viseme_params["I"], 1.5, 2.0),
-        #             ("O", self.viseme_mapper.viseme_params["O"], 2.0, 2.5),
-        #             ("U", self.viseme_mapper.viseme_params["U"], 2.5, 3.0),
-        #             ("REST", self.viseme_mapper.viseme_params["REST"], 3.0, duration)
-        #         ]
-        #
-        # print(f"Generated {len(viseme_sequence)} viseme segments")
-        # return viseme_sequence
+        if not has_speech and duration and duration > 1.0:
+            print("WARNING: No speech visemes found in the sequence! Forcing some speech visemes.")
+            # Add a simple A-E-I-O-U sequence
+            viseme_sequence = [
+                ("REST", (
+                self.viseme_map["REST"].jaw_open, self.viseme_map["REST"].lip_round, self.viseme_map["REST"].lip_width),
+                 0.0, 0.5),
+                ("A", (self.viseme_map["A"].jaw_open, self.viseme_map["A"].lip_round, self.viseme_map["A"].lip_width),
+                 0.5, 1.0),
+                ("E", (self.viseme_map["E"].jaw_open, self.viseme_map["E"].lip_round, self.viseme_map["E"].lip_width),
+                 1.0, 1.5),
+                ("I", (self.viseme_map["I"].jaw_open, self.viseme_map["I"].lip_round, self.viseme_map["I"].lip_width),
+                 1.5, 2.0),
+                ("O", (self.viseme_map["O"].jaw_open, self.viseme_map["O"].lip_round, self.viseme_map["O"].lip_width),
+                 2.0, 2.5),
+                ("U", (self.viseme_map["U"].jaw_open, self.viseme_map["U"].lip_round, self.viseme_map["U"].lip_width),
+                 2.5, 3.0),
+                ("REST", (
+                self.viseme_map["REST"].jaw_open, self.viseme_map["REST"].lip_round, self.viseme_map["REST"].lip_width),
+                 3.0, duration)
+            ]
+
+        print(f"Generated {len(viseme_sequence)} viseme segments")
+        return viseme_sequence
 
     def animate_with_videos(self, audio_file, speaking_video_path, silence_video_path, script_text=None):
         """
         Animate lip sync using data extracted from videos and synchronized with audio.
         If script_text is provided, it will be used to generate a viseme sequence.
+        Enhanced with smoother transitions and better viseme mapping.
         """
         # Process videos first
         if not self.process_videos(speaking_video_path, silence_video_path):
@@ -863,9 +688,15 @@ class RealisticLipSyncAnimator:
             if audio_mars is not None:
                 audio_duration = len(audio_mars) / fps
             self.viseme_sequence = self.generate_viseme_sequence_from_text(script_text, audio_duration)
-            print(f"Generated viseme sequence with {len(self.viseme_sequence)} segments")
+
+            # Add this check
+            if self.viseme_sequence is None:
+                print("Error: Failed to generate viseme sequence. Using audio analysis only.")
+                self.viseme_sequence = []
+            else:
+                print(f"Generated viseme sequence with {len(self.viseme_sequence)} segments")
         else:
-            self.viseme_sequence = None
+            self.viseme_sequence = []
             print("No script text provided, using audio analysis only")
 
         # Animation loop setup
@@ -883,6 +714,8 @@ class RealisticLipSyncAnimator:
 
         # Main animation loop
         while running:
+            delta_time = 1.0 / self.fps  # For animation updates
+
             # Process events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -930,31 +763,123 @@ class RealisticLipSyncAnimator:
 
                 # Get current viseme from sequence if available
                 current_viseme_name = "REST"
-                current_viseme_params = self.viseme_mapper.viseme_params["REST"]
+                current_viseme_params = (
+                    self.viseme_map["REST"].jaw_open,
+                    self.viseme_map["REST"].lip_round,
+                    self.viseme_map["REST"].lip_width
+                )
 
                 if self.viseme_sequence:
-                    for viseme_name, viseme_params, start_time, end_time in self.viseme_sequence:
-                        if start_time <= current_time < end_time:
-                            current_viseme_name = viseme_name
-                            current_viseme_params = viseme_params
+                    # Find the current viseme based on time
+                    for viseme_name, viseme_params, start, end in self.viseme_sequence:
+                        if start <= current_time < end:
+                            # Check for transitions
+                            if current_time >= end - self.transition_time and end < self.viseme_sequence[-1][3]:
+                                # Transition to next viseme
+                                next_idx = next((i for i, v in enumerate(self.viseme_sequence)
+                                                 if v[2] >= end), None)
+                                if next_idx is not None:
+                                    next_viseme = self.viseme_sequence[next_idx][0]
+                                    next_params = self.viseme_sequence[next_idx][1]
+                                    blend = (current_time - (end - self.transition_time)) / self.transition_time
+                                    blend = max(0, min(1, blend))
+
+                                    # Interpolate between current and next viseme
+                                    jaw_open = viseme_params[0] * (1 - blend) + next_params[0] * blend
+                                    lip_round = viseme_params[1] * (1 - blend) + next_params[1] * blend
+                                    lip_width = viseme_params[2] * (1 - blend) + next_params[2] * blend
+
+                                    current_viseme_name = f"{viseme_name}->{next_viseme}"
+                                    current_viseme_params = (jaw_open, lip_round, lip_width)
+                            elif current_time <= start + self.transition_time and start > self.viseme_sequence[0][
+                                2]:
+                                # Transition from previous viseme
+                                prev_idx = next((i for i, v in enumerate(reversed(self.viseme_sequence))
+                                                 if v[3] <= start), None)
+                                if prev_idx is not None:
+                                    prev_idx = len(self.viseme_sequence) - 1 - prev_idx
+                                    prev_viseme = self.viseme_sequence[prev_idx][0]
+                                    prev_params = self.viseme_sequence[prev_idx][1]
+                                    blend = (current_time - start) / self.transition_time
+                                    blend = max(0, min(1, blend))
+
+                                    # Interpolate between previous and current viseme
+                                    jaw_open = prev_params[0] * (1 - blend) + viseme_params[0] * blend
+                                    lip_round = prev_params[1] * (1 - blend) + viseme_params[1] * blend
+                                    lip_width = prev_params[2] * (1 - blend) + viseme_params[2] * blend
+
+                                    current_viseme_name = f"{prev_viseme}->{viseme_name}"
+                                    current_viseme_params = (jaw_open, lip_round, lip_width)
+                            else:
+                                current_viseme_name = viseme_name
+                                current_viseme_params = viseme_params
                             break
+                elif audio_mars is not None and frame_idx < len(audio_mars):
+                    # Use audio analysis to determine mouth openness
+                    mar_value = audio_mars[frame_idx]
+
+                    # Map MAR to viseme
+                    if mar_value < 0.25:
+                        current_viseme_name = "REST"
+                        current_viseme_params = (
+                            self.viseme_map["REST"].jaw_open,
+                            self.viseme_map["REST"].lip_round,
+                            self.viseme_map["REST"].lip_width
+                        )
+                    elif mar_value < 0.32:
+                        current_viseme_name = "I"
+                        current_viseme_params = (
+                            self.viseme_map["I"].jaw_open,
+                            self.viseme_map["I"].lip_round,
+                            self.viseme_map["I"].lip_width
+                        )
+                    elif mar_value < 0.40:
+                        current_viseme_name = "A"
+                        current_viseme_params = (
+                            self.viseme_map["A"].jaw_open,
+                            self.viseme_map["A"].lip_round,
+                            self.viseme_map["A"].lip_width
+                        )
+                    elif mar_value < 0.48:
+                        current_viseme_name = "O"
+                        current_viseme_params = (
+                            self.viseme_map["O"].jaw_open,
+                            self.viseme_map["O"].lip_round,
+                            self.viseme_map["O"].lip_width
+                        )
+                    else:
+                        current_viseme_name = "Wide"
+                        current_viseme_params = (
+                            self.viseme_map["Wide"].jaw_open,
+                            self.viseme_map["Wide"].lip_round,
+                            self.viseme_map["Wide"].lip_width
+                        )
 
                 # Get the appropriate video frame
                 frame_to_use = frame_idx
 
-                # IMPORTANT FIX: Always use speaking frames during active playback,
-                # regardless of viseme type. Only use silence frames when paused or not started.
-                if self.video_extractor.speaking_video_frames:
+                # Determine whether to use speaking or silence frame
+                use_silence = False
+                if self.viseme_sequence:
+                    # Use silence frames only for REST visemes
+                    use_silence = (current_viseme_name == "REST")
+                elif audio_mars is not None and frame_idx < len(audio_mars):
+                    # Use silence frames when audio is below threshold
+                    use_silence = (audio_mars[frame_idx] < self.silence_threshold)
+
+                # Update blinking and idle animations
+                self.update_blink(delta_time)
+                idle_x, idle_y = self.update_idle_animation(delta_time)
+
+                # Get the frame from the appropriate video
+                if self.video_extractor.speaking_video_frames and not use_silence:
                     frame_to_use = frame_idx % len(self.video_extractor.speaking_video_frames)
                     video_frame = self.video_extractor.get_frame(frame_to_use, False)
-                    use_silence = False
                 elif self.video_extractor.silence_video_frames:
                     frame_to_use = frame_idx % len(self.video_extractor.silence_video_frames)
                     video_frame = self.video_extractor.get_frame(frame_to_use, True)
-                    use_silence = True
                 else:
                     video_frame = None
-                    use_silence = True
 
                 if video_frame is not None:
                     # Process the frame with the current viseme
@@ -975,7 +900,8 @@ class RealisticLipSyncAnimator:
                     self.screen.blit(video_surface, (0, 0))
 
                     # Display current information
-                    time_text = font.render(f'Time: {current_time:.2f}s | Frame: {frame_idx}', True, (255, 255, 255))
+                    time_text = font.render(f'Time: {current_time:.2f}s | Frame: {frame_idx}', True,
+                                            (255, 255, 255))
                     self.screen.blit(time_text, (10, self.height - 80))
 
                     viseme_text = font.render(f'Viseme: {current_viseme_name}', True, (255, 255, 255))
@@ -1001,7 +927,15 @@ class RealisticLipSyncAnimator:
                 # When paused or not started, show the first frame of the silence video
                 silence_frame = self.video_extractor.get_frame(0, True)
                 if silence_frame is not None:
-                    silence_frame_rgb = cv2.cvtColor(silence_frame, cv2.COLOR_BGR2RGB)
+                    # Process with REST viseme
+                    rest_params = (
+                        self.viseme_map["REST"].jaw_open,
+                        self.viseme_map["REST"].lip_round,
+                        self.viseme_map["REST"].lip_width
+                    )
+
+                    processed_silence = self.process_frame_with_viseme(silence_frame, "REST", rest_params)
+                    silence_frame_rgb = cv2.cvtColor(processed_silence, cv2.COLOR_BGR2RGB)
                     silence_surface = pygame.surfarray.make_surface(silence_frame_rgb.swapaxes(0, 1))
                     if silence_surface.get_width() != self.width or silence_surface.get_height() != self.height:
                         silence_surface = pygame.transform.scale(silence_surface, (self.width, self.height))
@@ -1026,6 +960,35 @@ class RealisticLipSyncAnimator:
 
         pygame.mixer.music.stop()
         print("Animation complete")
+
+    def process_videos(self, speaking_video_path, silence_video_path):
+        """
+        Process both speaking and silence videos to extract mouth data.
+        """
+        print("Processing speaking video...")
+        speaking_data = self.video_extractor.extract_mouth_data_from_video(speaking_video_path, False)
+        if not speaking_data:
+            print("Warning: No mouth data extracted from speaking video")
+        self.speaking_mouth_data = speaking_data
+
+        print("Processing silence video...")
+        silence_data = self.video_extractor.extract_mouth_data_from_video(silence_video_path, True)
+        if not silence_data:
+            print("Warning: No mouth data extracted from silence video")
+        self.silence_mouth_data = silence_data
+
+        print("Video processing complete.")
+
+        # Make sure we have at least some data to work with
+        has_speaking_data = len(self.speaking_mouth_data) > 0 if self.speaking_mouth_data else False
+        has_silence_data = len(self.silence_mouth_data) > 0 if self.silence_mouth_data else False
+
+        if not has_speaking_data:
+            print("Error: No mouth data available from speaking video")
+        if not has_silence_data:
+            print("Error: No mouth data available from silence video")
+
+        return has_speaking_data and has_silence_data
 
     def run_video_based_demo(self, audio_file, speaking_video, silence_video, script_text=None):
         """
@@ -1059,14 +1022,12 @@ def main():
     animator = RealisticLipSyncAnimator(width=800, height=600)
 
     # Ask user for input files
-    audio_file = "sample_audio.wav"  # input("Enter path to audio file: ")
-    speaking_video = "./speaking.mp4"  # input("Enter path to speaking video file: ")
-    silence_video = "./silence.mp4"  # input("Enter path to silence video file: ")
+    audio_file = input("Enter path to audio file (default: sample_audio.wav): ") or "sample_audio.wav"
+    speaking_video = input("Enter path to speaking video file (default: ./speaking.mp4): ") or "./speaking.mp4"
+    silence_video = input("Enter path to silence video file (default: ./silence.mp4): ") or "./silence.mp4"
 
     # Ask for optional script text
-    script_text = input("Enter script text for phoneme-viseme mapping (or press ENTER to skip): ")
-    if not script_text.strip():
-        script_text = "Hello World, This is a Lip Sync test."
+    script_text = input("Enter script text for phoneme-viseme mapping (default: Hello World, This is a Lip Sync test.): ") or "Hello World, This is a Lip Sync test."
 
     # Run the demo
     animator.run_video_based_demo(audio_file, speaking_video, silence_video, script_text)
