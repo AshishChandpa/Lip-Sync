@@ -1,5 +1,5 @@
 """
-Text_to_lip_animation.py
+Text_to_lip_animation.py with voice synthesis capabilities
 """
 import os
 import cv2
@@ -13,12 +13,17 @@ import phonemizer
 from phonemizer.backend import EspeakBackend
 import imageio
 from tqdm import tqdm
+import tempfile
+import subprocess
+import gtts
+from pydub import AudioSegment
+from moviepy.editor import VideoFileClip, AudioFileClip
 
 
 class TextToLipAnimation:
     def __init__(self, input_video_path, viseme_folder, output_path="animated_output.mp4"):
         """
-        Initialize the Text to Lip Animation generator
+        Initialize the Text to Lip Animation generator with voice synthesis
 
         Args:
             input_video_path (str): Path to the video with a person not speaking
@@ -28,6 +33,8 @@ class TextToLipAnimation:
         self.input_video_path = input_video_path
         self.viseme_folder = viseme_folder
         self.output_path = output_path
+        self.temp_video_path = os.path.splitext(output_path)[0] + "_temp.mp4"
+        self.temp_audio_path = os.path.splitext(output_path)[0] + "_speech.mp3"
 
         # Create the espeak backend for phonemizing text
         self.backend = EspeakBackend('en-us')
@@ -215,6 +222,39 @@ class TextToLipAnimation:
 
         return phoneme_durations
 
+    def generate_speech(self, text, output_path):
+        """
+        Generate speech audio from text using gTTS
+
+        Args:
+            text (str): Text to convert to speech
+            output_path (str): Path to save the generated audio file
+
+        Returns:
+            float: Duration of the generated audio in seconds
+        """
+        print(f"Generating speech audio for: {text[:50]}{'...' if len(text) > 50 else ''}")
+
+        try:
+            # Generate speech using Google Text-to-Speech
+            tts = gtts.gTTS(text=text, lang='en', slow=False)
+            tts.save(output_path)
+
+            # Get the duration of the audio file
+            audio = AudioSegment.from_file(output_path)
+            duration = len(audio) / 1000.0  # Convert ms to seconds
+
+            print(f"Speech generation complete. Duration: {duration:.2f} seconds")
+            return duration
+        except Exception as e:
+            print(f"Error generating speech: {e}")
+            # Create a silent audio file of appropriate length as fallback
+            estimated_duration = len(text.split()) * 0.3  # Rough estimate: 0.3 seconds per word
+            silence = AudioSegment.silent(duration=int(estimated_duration * 1000))
+            silence.export(output_path, format="mp3")
+            print(f"Created silent audio as fallback. Duration: {estimated_duration:.2f} seconds")
+            return estimated_duration
+
     def get_face_landmarks(self, frame):
         """
         Get facial landmarks for a frame
@@ -326,7 +366,7 @@ class TextToLipAnimation:
 
     def animate_from_text(self, text, words_per_minute=150):
         """
-        Create a lip-synced animation from text
+        Create a lip-synced animation from text with speech
 
         Args:
             text (str): Text to animate
@@ -340,20 +380,30 @@ class TextToLipAnimation:
             print("Error: No viseme images available. Animation cannot be created.")
             return False
 
+        # Generate speech audio
+        audio_duration = self.generate_speech(text, self.temp_audio_path)
+
         # Convert text to phonemes with timing
         print("Converting text to phonemes...")
         phoneme_durations = self.text_to_phonemes(text)
 
         # Convert phonemes to visemes
         viseme_sequence = []
-        total_duration = 0
+        estimated_duration = 0
 
         for phoneme, duration in phoneme_durations:
             viseme = self.phoneme_to_viseme(phoneme)
             viseme_sequence.append((viseme, duration))
-            total_duration += duration
+            estimated_duration += duration
 
-        print(f"Generated {len(viseme_sequence)} visemes with total duration of {total_duration:.2f} seconds")
+        print(f"Generated {len(viseme_sequence)} visemes with estimated duration of {estimated_duration:.2f} seconds")
+
+        # Adjust phoneme durations to match actual audio duration
+        if estimated_duration > 0 and audio_duration > 0:
+            scale_factor = audio_duration / estimated_duration
+            viseme_sequence = [(viseme, duration * scale_factor) for viseme, duration in viseme_sequence]
+            print(f"Adjusted viseme durations to match audio duration of {audio_duration:.2f} seconds")
+            estimated_duration = audio_duration
 
         # Open the input video
         print(f"Opening input video: {self.input_video_path}")
@@ -373,10 +423,10 @@ class TextToLipAnimation:
 
         # Initialize video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(self.temp_video_path, fourcc, fps, (width, height))
 
         # Calculate frames needed for the animation
-        frames_needed = int(total_duration * fps)
+        frames_needed = int(estimated_duration * fps)
 
         # Check if input video has enough frames
         if frames_needed > frame_count:
@@ -459,8 +509,71 @@ class TextToLipAnimation:
         video.release()
         writer.release()
 
-        print(f"Animation complete! Output saved to {self.output_path}")
+        # Combine video and audio
+        print("Combining animation with speech audio...")
+        self.combine_video_and_audio(self.temp_video_path, self.temp_audio_path, self.output_path)
+
+        # Clean up temporary files
+        if os.path.exists(self.temp_video_path):
+            os.remove(self.temp_video_path)
+
+        print(f"Animation with speech complete! Output saved to {self.output_path}")
         return True
+
+    def combine_video_and_audio(self, video_path, audio_path, output_path):
+        """
+        Combine video and audio into a single file
+
+        Args:
+            video_path (str): Path to video file
+            audio_path (str): Path to audio file
+            output_path (str): Path to save the combined file
+        """
+        try:
+            # Load the video and audio clips
+            video_clip = VideoFileClip(video_path)
+            audio_clip = AudioFileClip(audio_path)
+
+            # Set the audio of the video clip
+            video_with_audio = video_clip.set_audio(audio_clip)
+
+            # Write the result to a file
+            video_with_audio.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True
+            )
+
+            # Close the clips
+            video_clip.close()
+            audio_clip.close()
+
+        except Exception as e:
+            print(f"Error combining video and audio: {e}")
+            print("Trying alternative method with FFmpeg...")
+
+            try:
+                # Alternative method using FFmpeg directly
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-i', video_path,
+                    '-i', audio_path,
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-shortest',
+                    output_path
+                ]
+                subprocess.run(cmd, check=True)
+            except Exception as e2:
+                print(f"Error with alternative method: {e2}")
+                print("Keeping silent video as output.")
+                # If all else fails, just rename the video file
+                import shutil
+                shutil.copy(video_path, output_path)
 
     def create_preview_gif(self, duration=5.0):
         """
@@ -535,10 +648,10 @@ class TextToLipAnimation:
 
 def main():
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Generate lip animation from text')
+    parser = argparse.ArgumentParser(description='Generate lip animation from text with speech')
     parser.add_argument('--video', required=True, help='Path to input video with a person')
     parser.add_argument('--visemes', required=True, help='Path to folder containing viseme images')
-    parser.add_argument('--text', required=True, help='Text to animate')
+    parser.add_argument('--text', required=True, help='Text to animate and speak')
     parser.add_argument('--output', default='animated_speech.mp4', help='Output video path')
     parser.add_argument('--wpm', type=int, default=150, help='Words per minute speaking rate')
     parser.add_argument('--preview', action='store_true', help='Create a preview GIF')
@@ -552,7 +665,7 @@ def main():
         output_path=args.output
     )
 
-    # Animate from text
+    # Animate from text with speech
     success = animator.animate_from_text(args.text, words_per_minute=args.wpm)
 
     if success and args.preview:
