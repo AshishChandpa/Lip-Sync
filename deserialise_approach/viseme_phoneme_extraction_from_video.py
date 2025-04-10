@@ -34,7 +34,7 @@ from phonemizer.backend import EspeakBackend
 
 
 class VisemePhonemeExtractor:
-    def __init__(self, video_path, output_dir="visemes_output"):
+    def __init__(self, video_path, output_dir="visemes"):
         """
         Initialize the Viseme and Phoneme extractor.
 
@@ -78,7 +78,7 @@ class VisemePhonemeExtractor:
         self.detector = dlib.get_frontal_face_detector()
         # You need to download the predictor file from:
         # http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
-        predictor_path = "shape_predictor_68_face_landmarks.dat"
+        predictor_path = "flask_app/shape_predictor_68_face_landmarks.dat"
 
         # Check if the predictor file exists in the current directory
         if not os.path.exists(predictor_path):
@@ -86,7 +86,7 @@ class VisemePhonemeExtractor:
             alternate_paths = [
                 "./shape_predictor_68_face_landmarks.dat",
                 os.path.join(os.path.dirname(__file__), "shape_predictor_68_face_landmarks.dat"),
-                os.path.abspath("shape_predictor_68_face_landmarks.dat"),
+                os.path.abspath("flask_app/shape_predictor_68_face_landmarks.dat"),
                 # Add the path without file extension
                 "shape_predictor_68_face_landmarks",
                 "./shape_predictor_68_face_landmarks"

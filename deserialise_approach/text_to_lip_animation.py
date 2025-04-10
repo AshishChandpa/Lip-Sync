@@ -55,12 +55,12 @@ class TextToLipAnimation:
         # Initialize dlib face detector and predictor
         self.detector = dlib.get_frontal_face_detector()
         try:
-            predictor_path = "shape_predictor_68_face_landmarks.dat"
+            predictor_path = "flask_app/shape_predictor_68_face_landmarks.dat"
             if not os.path.exists(predictor_path):
                 alternate_paths = [
                     "./shape_predictor_68_face_landmarks.dat",
                     os.path.join(os.path.dirname(__file__), "shape_predictor_68_face_landmarks.dat"),
-                    os.path.abspath("shape_predictor_68_face_landmarks.dat")
+                    os.path.abspath("flask_app/shape_predictor_68_face_landmarks.dat")
                 ]
                 for alt_path in alternate_paths:
                     if os.path.exists(alt_path):
