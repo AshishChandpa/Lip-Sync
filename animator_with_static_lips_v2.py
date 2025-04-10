@@ -682,7 +682,7 @@ class RealisticLipSyncAnimator:
     def process_frame_with_viseme(self, frame, viseme_name, viseme_params):
         """
         Process a frame to apply the viseme using pre-extracted mouth images.
-        Only blends the actual lips area, not the entire rectangle.
+        Maintains consistent mouth size and uses pre-extracted viseme images for better mouth opening.
         """
         frame_copy = frame.copy()
 
@@ -713,62 +713,94 @@ class RealisticLipSyncAnimator:
                 left, right = min(xs), max(xs)
                 top, bottom = min(ys), max(ys)
 
+                # Store the original mouth size
+                original_width = right - left
+                original_height = bottom - top
+
                 # Add padding
-                padding = int((bottom - top) * 0.5)
+                padding = int((bottom - top) * 0.2)  # Reduced padding to keep size more consistent
                 top = max(0, top - padding)
                 bottom = min(frame.shape[0], bottom + padding)
                 left = max(0, left - padding)
                 right = min(frame.shape[1], right + padding)
 
                 # Resize the mouth image to fit the detected mouth region
-                mouth_img_resized = cv2.resize(mouth_img, (right - left, bottom - top))
+                # Maintain the original aspect ratio of the viseme image
+                mouth_img_height, mouth_img_width = mouth_img.shape[:2]
+                aspect_ratio = mouth_img_width / mouth_img_height
 
-                # Create a mask for the lips using color thresholding
-                # Convert to HSV for better color segmentation
-                mouth_hsv = cv2.cvtColor(mouth_img_resized, cv2.COLOR_BGR2HSV)
+                # Use the original mouth width as a base to maintain consistent size
+                target_width = original_width
+                target_height = int(target_width / aspect_ratio)
 
-                # Define range for lip color (adjust these values based on your specific images)
-                # These are example values for reddish/pinkish lips
-                lower_lip = np.array([0, 50, 50])
-                upper_lip = np.array([20, 255, 255])
+                # Resize the viseme mouth image
+                mouth_img_resized = cv2.resize(mouth_img, (target_width, target_height))
 
-                # Create a mask for lip color
-                lip_mask = cv2.inRange(mouth_hsv, lower_lip, upper_lip)
+                # Calculate placement to center the mouth image in the mouth region
+                place_x = left + (right - left - target_width) // 2
+                place_y = top + (bottom - top - target_height) // 2
 
-                # Improve the mask with morphological operations
-                kernel = np.ones((3, 3), np.uint8)
-                lip_mask = cv2.dilate(lip_mask, kernel, iterations=2)
-                lip_mask = cv2.GaussianBlur(lip_mask, (5, 5), 0)
+                # Ensure placement coordinates are valid
+                place_x = max(0, place_x)
+                place_y = max(0, place_y)
 
-                # Alternative: Create a mask from the mouth landmarks
-                # This is more reliable if color thresholding doesn't work well
-                mask = np.zeros((bottom - top, right - left), dtype=np.uint8)
+                # Create a mask for the mouth region
+                mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+
+                # Draw the mouth region on the mask
                 mouth_hull = []
                 for point in mouth_points:
-                    mouth_hull.append((point[0] - left, point[1] - top))
-                cv2.fillConvexPoly(mask, np.array(mouth_hull), 255)
+                    mouth_hull.append((point[0], point[1]))
 
-                # Dilate the mask to include the full lips
-                mask = cv2.dilate(mask, kernel, iterations=2)
+                if len(mouth_hull) > 2:  # Need at least 3 points for a polygon
+                    cv2.fillConvexPoly(mask, np.array(mouth_hull), 255)
 
-                # Create a 3-channel mask for blending
-                mask_3ch = cv2.merge([mask, mask, mask])
+                    # Dilate the mask slightly to ensure full coverage
+                    kernel = np.ones((3, 3), np.uint8)
+                    mask = cv2.dilate(mask, kernel, iterations=1)
 
-                # Extract the current frame's mouth region
-                frame_mouth_region = frame_copy[top:bottom, left:right]
+                    # Create a region of interest for placing the mouth image
+                    roi_x = place_x
+                    roi_y = place_y
+                    roi_width = min(target_width, frame.shape[1] - roi_x)
+                    roi_height = min(target_height, frame.shape[0] - roi_y)
 
-                # Blend only the masked area
-                # Convert mask to float and scale
-                mask_float = mask.astype(float) / 255.0
-                mask_3ch_float = np.stack([mask_float, mask_float, mask_float], axis=2)
+                    if roi_width > 0 and roi_height > 0:
+                        # Crop the mouth image if needed
+                        mouth_crop = mouth_img_resized[:roi_height, :roi_width]
 
-                # Blend the images using the mask
-                blended = frame_mouth_region * (1 - mask_3ch_float) + mouth_img_resized * mask_3ch_float
+                        # Get the corresponding region from the frame
+                        frame_roi = frame_copy[roi_y:roi_y + roi_height, roi_x:roi_x + roi_width]
 
-                # Place the blended region back into the frame
-                frame_copy[top:bottom, left:right] = blended.astype(np.uint8)
+                        # Get the mask for this region
+                        mask_roi = mask[roi_y:roi_y + roi_height, roi_x:roi_x + roi_width]
 
+                        # Create a 3-channel mask
+                        mask_roi_3ch = cv2.merge([mask_roi, mask_roi, mask_roi])
 
+                        # Normalize the mask
+                        mask_roi_norm = mask_roi.astype(float) / 255.0
+
+                        # Apply the viseme parameters to control the blend
+                        # Use jaw_open to determine how much of the viseme image to show
+                        jaw_open = viseme_params[0]
+                        blend_factor = min(1.0, jaw_open * 1.5) + 1.0  # Scale jaw_open for better effect
+
+                        # For REST viseme, use a lower blend factor to keep mouth more closed
+                        if viseme_name == "REST":
+                            blend_factor *= 0.5
+
+                        # Blend the images
+                        for c in range(3):  # For each color channel
+                            frame_roi[:, :, c] = np.where(
+                                mask_roi > 0,
+                                frame_roi[:, :, c] * (1 - blend_factor * mask_roi_norm) +
+                                mouth_crop[:, :, c] * (blend_factor * mask_roi_norm),
+                                frame_roi[:, :, c]
+                            )
+
+                        # Place the blended region back into the frame
+                        frame_copy[roi_y:roi_y + roi_height, roi_x:roi_x + roi_width] = frame_roi
         else:
             # Fall back to the original method if no pre-extracted images are available
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -804,7 +836,7 @@ class RealisticLipSyncAnimator:
                 ys = [p[1] for p in mouth_points]
                 left, right = min(xs), max(xs)
                 top, bottom = min(ys), max(ys)
-                padding = int((bottom - top) * 0.2)
+                padding = int((bottom - top) * 0.6)
                 top = max(0, top - padding)
                 bottom = min(frame.shape[0], bottom + padding)
                 left = max(0, left - padding)
@@ -812,62 +844,35 @@ class RealisticLipSyncAnimator:
 
                 mouth_roi = frame[top:bottom, left:right]
                 if mouth_roi.size > 0:
-                    # Apply different transformations based on viseme type
+                    # For consistent size, use minimal warping
+                    # Just apply subtle changes based on viseme
                     if viseme_name == "REST":
-                        # For REST, minimal jaw opening
-                        jaw_factor = 0.9  # Slightly closed
-                        width_factor = 1.0
+                        # For REST, keep original size
+                        warped_mouth = mouth_roi.copy()
                     else:
-                        # For other visemes, apply parameters more aggressively
-                        # Map jaw_open (0.0-1.0) to a range that creates visible difference (0.8-2.0)
-                        jaw_factor = 0.8 + jaw_open * 0.8
+                        # For other visemes, apply subtle changes
+                        # Calculate new dimensions - keep width the same
+                        new_width = right - left
 
-                        # Map lip_width (0.4-0.8) to a range that creates visible difference (0.8-1.6)
-                        width_factor = 0.8 + lip_width * 0.8
+                        # Adjust height based on jaw_open but keep changes minimal
+                        jaw_factor = 1.0 + (jaw_open * 0.4)  # Max 20% increase
+                        new_height = int((bottom - top) * jaw_factor)
 
-                    # Calculate new dimensions
-                    new_height = int((bottom - top) * jaw_factor)
-                    new_width = int((right - left) * width_factor)
-
-                    try:
                         # Resize the mouth region
                         warped_mouth = cv2.resize(mouth_roi, (new_width, new_height))
 
-                        # Calculate placement coordinates
-                        center_x = left + (right - left) // 2
-                        center_y = top + (bottom - top) // 2
+                    # Calculate placement coordinates
+                    new_left = left
+                    new_top = top
+                    new_right = min(frame.shape[1], new_left + warped_mouth.shape[1])
+                    new_bottom = min(frame.shape[0], new_top + warped_mouth.shape[0])
 
-                        # Apply lip rounding effect
-                        if lip_round > 0.5:
-                            # For rounded visemes (O, U), make mouth more oval and move up slightly
-                            # Adjust height to make more oval for rounded sounds
-                            oval_factor = 1.0 + lip_round * 0.3
-                            warped_mouth = cv2.resize(warped_mouth,
-                                                      (new_width, int(new_height * oval_factor)))
-                            # Move up slightly for rounded sounds
-                            center_y -= int(padding * lip_round * 0.5)
+                    # Adjust warped_mouth if needed
+                    if warped_mouth.shape[1] != new_right - new_left or warped_mouth.shape[0] != new_bottom - new_top:
+                        warped_mouth = cv2.resize(warped_mouth, (new_right - new_left, new_bottom - new_top))
 
-                        # Calculate final placement
-                        new_left = max(0, center_x - warped_mouth.shape[1] // 2)
-                        new_top = max(0, center_y - warped_mouth.shape[0] // 2)
-                        new_right = min(frame.shape[1], new_left + warped_mouth.shape[1])
-                        new_bottom = min(frame.shape[0], new_top + warped_mouth.shape[0])
-
-                        # Adjust warped_mouth if needed
-                        if warped_mouth.shape[1] != new_right - new_left or warped_mouth.shape[
-                            0] != new_bottom - new_top:
-                            warped_mouth = cv2.resize(warped_mouth, (new_right - new_left, new_bottom - new_top))
-
-                        # Place the warped mouth back into the frame
-                        frame_copy[new_top:new_bottom, new_left:new_right] = warped_mouth
-
-                        # Draw a colored outline for debugging
-                        # color = (0, 255, 0) if viseme_name == "REST" else (0, 255, 255)
-                        # cv2.rectangle(frame_copy, (new_left, new_top), (new_right, new_bottom), color, 1)
-
-                    except Exception as e:
-                        print(f"Error warping mouth: {e}")
-                        cv2.rectangle(frame_copy, (left, top), (right, bottom), (255, 0, 0), 2)
+                    # Place the warped mouth back into the frame
+                    frame_copy[new_top:new_bottom, new_left:new_right] = warped_mouth
 
         # Add viseme info to the frame
         info_text = f"Viseme: {viseme_name} | Jaw: {viseme_params[0]:.1f}, Round: {viseme_params[1]:.1f}, Width: {viseme_params[2]:.1f}"
@@ -875,12 +880,60 @@ class RealisticLipSyncAnimator:
 
         return frame_copy
 
+    def set_custom_mouth_image(self, image_path):
+        """
+        Set a custom mouth image to use for all visemes.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not os.path.exists(image_path):
+            print(f"Error: Image file {image_path} not found")
+            return False
+
+        try:
+            # Load the image
+            custom_img = cv2.imread(image_path)
+            if custom_img is None:
+                print(f"Error: Could not load image from {image_path}")
+                return False
+
+            # Use this image for all viseme types
+            self.viseme_images = {}
+            for viseme in self.viseme_map.keys():
+                self.viseme_images[viseme] = [custom_img]
+
+            print(f"Successfully set custom mouth image for all visemes")
+            return True
+        except Exception as e:
+            print(f"Error setting custom mouth image: {e}")
+            return False
+
     def animate_with_videos(self, audio_file, speaking_video_path, silence_video_path, script_text=None):
         """
         Animate lip sync using data extracted from videos and synchronized with audio.
         If script_text is provided, it will be used to generate a viseme sequence.
         Enhanced with smoother transitions and better viseme mapping.
         """
+        # Check if we already have custom mouth images set
+        has_custom_images = hasattr(self, 'viseme_images') and self.viseme_images and any(
+            len(imgs) > 0 for imgs in self.viseme_images.values())
+
+        # Only load from directory if we don't have custom images already set
+        if not has_custom_images:
+            # Load pre-extracted viseme images if available
+            viseme_images_dir = "viseme_images"  # Default directory
+            if os.path.exists(viseme_images_dir):
+                print(f"Loading pre-extracted viseme images from {viseme_images_dir}...")
+                self.load_viseme_images(viseme_images_dir)
+            else:
+                print("No pre-extracted viseme images found. Using real-time processing.")
+        if not self.process_videos(speaking_video_path, silence_video_path):
+            print("Error: Failed to process videos.")
+            return
         # Load pre-extracted viseme images if available
         viseme_images_dir = "viseme_images"  # Default directory
         if os.path.exists(viseme_images_dir):
@@ -1276,6 +1329,7 @@ class RealisticLipSyncAnimator:
 def main():
     # Default window size, will be adjusted to match video dimensions
     animator = RealisticLipSyncAnimator(width=800, height=600)
+    animator.set_custom_mouth_image("./viseme_images/A_000_mar_0.34.png")
 
     print("What would you like to do?")
     print("1. Run lip sync animation")
@@ -1304,6 +1358,7 @@ def main():
         "Enter script text for phoneme-viseme mapping (default: Hello World, This is a Lip Sync test.): ") or "Hello World, This is a Lip Sync test."
 
     # Run the demo
+    # animator.run_video_based_demo(audio_file, speaking_video, silence_video, script_text)
     animator.run_video_based_demo(audio_file, speaking_video, silence_video, script_text)
 
 
