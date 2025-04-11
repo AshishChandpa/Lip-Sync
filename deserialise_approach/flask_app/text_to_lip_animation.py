@@ -57,6 +57,28 @@ def convert_video(input_file, output_file):
         return None
 
 
+def resize_viseme_to_mouth(viseme_img, mouth_region, frame):
+    """
+    Resize the viseme image to fit the mouth region based on its detected size.
+
+    Args:
+        viseme_img (numpy.ndarray): Viseme image to be resized.
+        mouth_region (dict): Mouth region with width and height information.
+        frame (numpy.ndarray): The current video frame.
+
+    Returns:
+        numpy.ndarray: Resized viseme image to fit the mouth region.
+    """
+    mouth_width = mouth_region['width']
+    mouth_height = mouth_region['height']
+
+    # Resize the viseme image to fit the mouth region
+    resized_viseme = cv2.resize(viseme_img, (mouth_width, mouth_height))
+
+    # Ensure resizing maintains the correct aspect ratio and avoids distortion
+    return resized_viseme
+
+
 class LipSyncAnimator:
     def __init__(self, input_video, audio_file, viseme_folder, output_video, predictor_path, fps=30, resolution=None):
         self.input_video = input_video
@@ -519,6 +541,10 @@ class LipSyncAnimator:
 
     def apply_viseme_to_frame(self, frame, viseme_img, mouth_region, mouth_data):
         """Apply the viseme image to the frame with advanced blending techniques."""
+        # Resize the viseme image to match the mouth region dynamically
+        viseme_resized = resize_viseme_to_mouth(viseme_img, mouth_region, frame)
+
+        # Now apply the resized viseme to the frame
         mouth_x = mouth_region['x']
         mouth_y = mouth_region['y']
         mouth_width = mouth_region['width']
@@ -527,25 +553,17 @@ class LipSyncAnimator:
         # Get the region of interest from the original frame
         roi = frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width]
 
-        # Ensure ROI dimensions match the viseme
-        if roi.shape[:2] != viseme_img.shape[:2]:
-            try:
-                viseme_img = cv2.resize(viseme_img, (roi.shape[1], roi.shape[0]))
-            except Exception as e:
-                print(f"Error resizing viseme: {e}")
-                return
-
         # Check if viseme has alpha channel (4 channels)
-        if viseme_img.shape[2] == 4:
+        if viseme_resized.shape[2] == 4:
             # Extract the alpha channel
-            alpha = viseme_img[:, :, 3] / 255.0
+            alpha = viseme_resized[:, :, 3] / 255.0
 
             # Create a mask from alpha channel with blurred edges for smoother blending
             mask = alpha.copy()
             mask = cv2.GaussianBlur(mask, (5, 5), 0)
 
             # Extract BGR channels
-            viseme_rgb = viseme_img[:, :, :3]
+            viseme_rgb = viseme_resized[:, :, :3]
 
             # For each color channel
             for c in range(3):
@@ -555,9 +573,8 @@ class LipSyncAnimator:
             # Place the blended ROI back into the frame
             frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = roi
         else:
-            # If no alpha channel, create a more sophisticated blend
-            # Create a simple mask based on non-black pixels
-            gray_viseme = cv2.cvtColor(viseme_img, cv2.COLOR_BGR2GRAY)
+            # If no alpha channel, apply the normal blend
+            gray_viseme = cv2.cvtColor(viseme_resized, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(gray_viseme, 10, 255, cv2.THRESH_BINARY)
             mask = mask.astype(float) / 255
 
@@ -568,10 +585,11 @@ class LipSyncAnimator:
             mask = np.expand_dims(mask, axis=2)
 
             # Blend using the mask
-            blended = (1 - mask) * roi + mask * viseme_img
+            blended = (1 - mask) * roi + mask * viseme_resized
 
             # Update the frame
             frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = blended.astype(np.uint8)
+
     def generate_video_from_visemes(self, phoneme_timing):
         """Generate the video by overlaying viseme mouth images onto the original silent video frames."""
         # Make sure to use a widely supported codec
