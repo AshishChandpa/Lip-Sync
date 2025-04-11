@@ -750,8 +750,8 @@ def main():
     # Initialize the LipSyncAnimator
     input_video = "silence.mp4"  # The video of the person without sound
     audio_file = "ashish_audio.wav"  # The audio file that will sync to the video
-    viseme_folder = "visemes"  # Folder containing subfolders for each viseme
-    output_video = "lip_sync_output.mp4"  # Final output video file
+    viseme_folder = "../visemes"  # Folder containing subfolders for each viseme
+    output_video = "lip_sync_output_4.mp4"  # Final output video file
     predictor_path = "shape_predictor_68_face_landmarks.dat"  # Path to dlib's face predictor model
 
     print("Starting lip sync animation process...")

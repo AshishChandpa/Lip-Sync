@@ -310,7 +310,7 @@ class VisemePhonemeExtractor:
 
     def get_mouth_roi(self, frame, rect, landmarks):
         """
-        Extract the region of interest (ROI) containing the mouth
+        Extract the region of interest (ROI) containing the mouth with added padding
 
         Args:
             frame (numpy.ndarray): Video frame
@@ -318,31 +318,30 @@ class VisemePhonemeExtractor:
             landmarks (dlib.full_object_detection): Facial landmarks
 
         Returns:
-            numpy.ndarray: Cropped image of the mouth region
+            numpy.ndarray: Cropped image of the mouth region with padding
         """
-        # Get the mouth landmarks (points 48-68)
-        mouth_points = []
-        for i in range(48, 68):
+        lips_points = []
+        for i in range(48, 60):  # Only use points for the outer lip
             point = landmarks.part(i)
-            mouth_points.append((point.x, point.y))
+            lips_points.append((point.x, point.y))
 
-        # Find the bounding box of the mouth
-        x_min = min(point[0] for point in mouth_points)
-        y_min = min(point[1] for point in mouth_points)
-        x_max = max(point[0] for point in mouth_points)
-        y_max = max(point[1] for point in mouth_points)
+        # Find the bounding box of the lips (outer contour)
+        x_min = min(point[0] for point in lips_points)
+        y_min = min(point[1] for point in lips_points)
+        x_max = max(point[0] for point in lips_points)
+        y_max = max(point[1] for point in lips_points)
 
-        # Add some margin
-        margin = 10
-        x_min = max(0, x_min - margin)
-        y_min = max(0, y_min - margin)
-        x_max = min(frame.shape[1], x_max + margin)
-        y_max = min(frame.shape[0], y_max + margin)
+        # Add some margin around the lips if needed
+        padding = 5  # Adjust for more/less margin around the lips
+        x_min = max(0, x_min - padding)
+        y_min = max(0, y_min - padding)
+        x_max = min(frame.shape[1], x_max + padding)
+        y_max = min(frame.shape[0], y_max + padding)
 
-        # Crop the mouth region
-        mouth_roi = frame[y_min:y_max, x_min:x_max]
+        # Crop the lips region
+        lips_roi = frame[y_min:y_max, x_min:x_max]
 
-        return mouth_roi
+        return lips_roi
 
     def process_video(self):
         """Process the video to extract visemes and save them"""
@@ -518,7 +517,7 @@ class VisemePhonemeExtractor:
 def main():
     """Main function to run the viseme extraction"""
     # Replace with your video file path
-    video_path = "input_video.mp4"
+    video_path = "speaking.mp4"
 
     # Check if input file exists
     if not os.path.exists(video_path):
