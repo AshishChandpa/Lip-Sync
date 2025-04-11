@@ -78,6 +78,25 @@ def resize_viseme_to_mouth(viseme_img, mouth_region, frame):
     # Ensure resizing maintains the correct aspect ratio and avoids distortion
     return resized_viseme
 
+def apply_oval_mask(img):
+    """Applies an oval mask to the input image to give it an oval shape."""
+    h, w = img.shape[:2]
+
+    # Create a black mask with the same size and 1 channel
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    # Draw a white filled ellipse in the center
+    center = (w // 2, h // 2)
+    axes = (int(w * 0.7), int(h * 0.5))  # width and height of the ellipse
+    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+
+    # If image doesn't have alpha channel, add one
+    if img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+
+    # Apply mask to alpha channel
+    img[:, :, 3] = mask
+    return img
 
 class LipSyncAnimator:
     def __init__(self, input_video, audio_file, viseme_folder, output_video, predictor_path, fps=30, resolution=None):
@@ -276,7 +295,7 @@ class LipSyncAnimator:
 
             for img_path in viseme_images:
                 # Randomly pick one if there are too many to process efficiently
-                if random.random() < 0.7 and best_match is not None:
+                if random.random() < 0.5 and best_match is not None:
                     continue
 
                 # Load the image
@@ -302,11 +321,16 @@ class LipSyncAnimator:
 
             # If we found a good match, use it
             if best_match:
-                return best_match, cv2.imread(best_match, cv2.IMREAD_UNCHANGED)
+                img = cv2.imread(best_match, cv2.IMREAD_UNCHANGED)
+                img = apply_oval_mask(img)
+                return best_match, img
 
         # Fallback to random selection if we couldn't find a good match
         selected_path = random.choice(viseme_images)
-        return selected_path, cv2.imread(selected_path, cv2.IMREAD_UNCHANGED)
+        img = cv2.imread(best_match, cv2.IMREAD_UNCHANGED)
+        img = apply_oval_mask(img)
+        return best_match, img
+
     def phoneme_to_viseme(self, phoneme):
         """Map phoneme to viseme based on the actual viseme folders available."""
         # Based on the loaded viseme categories from the error message
@@ -394,7 +418,7 @@ class LipSyncAnimator:
 
             # Detect silent parts using audio energy
             silence_threshold = -35  # dB, adjust based on your audio characteristics
-            chunk_size = 100  # ms
+            chunk_size = 25  # ms
             silence_min_duration = 300  # ms minimum silence duration to consider
 
             # Process audio to find silence regions
@@ -504,7 +528,7 @@ class LipSyncAnimator:
         words = transcript.split()
         total_duration_ms = len(self.audio)
         word_duration = total_duration_ms / max(1, len(words)) / 1000.0  # in seconds
-
+        print(word_duration)
         timing = []
         start_time = 0.0
 
@@ -615,7 +639,7 @@ class LipSyncAnimator:
         print(f"Generating {total_frames} frames in the video...")
 
         # Add a small constant for floating point comparison safety
-        epsilon = 0.001
+        epsilon = 0.01
 
         # Store the last detected mouth region as fallback
         last_valid_mouth_region = None
@@ -767,7 +791,7 @@ def main():
     """
     # Initialize the LipSyncAnimator
     input_video = "silence.mp4"  # The video of the person without sound
-    audio_file = "ashish_audio.wav"  # The audio file that will sync to the video
+    audio_file = "2_audio.wav"  # The audio file that will sync to the video
     viseme_folder = "../visemes"  # Folder containing subfolders for each viseme
     output_video = "lip_sync_output_4.mp4"  # Final output video file
     predictor_path = "shape_predictor_68_face_landmarks.dat"  # Path to dlib's face predictor model
