@@ -132,7 +132,7 @@ class LipSyncAnimator:
         return viseme_images
 
     def get_mouth_landmarks(self, frame):
-        """Detect face and extract mouth landmarks using dlib."""
+        """Enhanced function to detect face and extract mouth landmarks using dlib."""
         # Convert frame to grayscale for better face detection
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -143,8 +143,19 @@ class LipSyncAnimator:
         if len(faces) == 0:
             return None
 
-        # Get the first face (assuming only one face in the video)
-        face = faces[0]
+        # Get the first face (or the largest face if multiple are detected)
+        if len(faces) > 1:
+            # Find the largest face by area
+            largest_area = 0
+            largest_face_idx = 0
+            for i, face in enumerate(faces):
+                area = (face.right() - face.left()) * (face.bottom() - face.top())
+                if area > largest_area:
+                    largest_area = area
+                    largest_face_idx = i
+            face = faces[largest_face_idx]
+        else:
+            face = faces[0]
 
         # Predict facial landmarks
         landmarks = self.predictor(gray, face)
@@ -155,33 +166,59 @@ class LipSyncAnimator:
             point = landmarks.part(i)
             mouth_points.append((point.x, point.y))
 
-        return mouth_points
+        # Calculate the mouth aspect ratio (height/width) for potential use in viseme selection
+        # Vertical distance between top and bottom lip
+        top_lip_center = ((landmarks.part(51).x + landmarks.part(62).x) // 2,
+                          (landmarks.part(51).y + landmarks.part(62).y) // 2)
+        bottom_lip_center = ((landmarks.part(57).x + landmarks.part(66).x) // 2,
+                             (landmarks.part(57).y + landmarks.part(66).y) // 2)
 
-    def get_mouth_region(self, mouth_landmarks):
-        """Calculate mouth region (rectangle) from landmarks."""
-        if not mouth_landmarks:
+        mouth_height = np.sqrt((top_lip_center[0] - bottom_lip_center[0]) ** 2 +
+                               (top_lip_center[1] - bottom_lip_center[1]) ** 2)
+
+        # Horizontal distance between mouth corners
+        mouth_width = np.sqrt((landmarks.part(48).x - landmarks.part(54).x) ** 2 +
+                              (landmarks.part(48).y - landmarks.part(54).y) ** 2)
+
+        # Calculate mouth aspect ratio
+        mouth_aspect_ratio = mouth_height / max(mouth_width, 1)  # Avoid division by zero
+
+        return {
+            'landmarks': mouth_points,
+            'aspect_ratio': mouth_aspect_ratio,
+            'open_ratio': mouth_height / max(mouth_width, 1),  # How open the mouth is
+            'face_bbox': (face.left(), face.top(), face.right(), face.bottom())
+        }
+
+    def get_mouth_region(self, mouth_data):
+        """Calculate mouth region (rectangle) from landmarks with dynamic padding."""
+        if not mouth_data or 'landmarks' not in mouth_data:
             return None
 
         # Convert landmarks to numpy array
-        points = np.array(mouth_landmarks)
+        points = np.array(mouth_data['landmarks'])
 
-        # Get the bounding rectangle with some padding
+        # Get the bounding rectangle
         x_min = np.min(points[:, 0])
         y_min = np.min(points[:, 1])
         x_max = np.max(points[:, 0])
         y_max = np.max(points[:, 1])
 
-        # Add padding around the mouth (20% extra width and height)
-        width = x_max - x_min
-        height = y_max - y_min
+        # Calculate padding based on the face size for better scaling
+        face_width = mouth_data['face_bbox'][2] - mouth_data['face_bbox'][0]
+        face_height = mouth_data['face_bbox'][3] - mouth_data['face_bbox'][1]
 
-        padding_x = int(width * 0.2)
-        padding_y = int(height * 0.2)
+        # Dynamic padding (proportional to face size)
+        padding_x = int(face_width * 0.05)  # 5% of face width
+        padding_y = int(face_height * 0.05)  # 5% of face height
+
+        # Additional padding below the mouth for better viseme placement
+        bottom_padding = int(padding_y * 1.5)  # 50% more padding at the bottom
 
         x_min = max(0, x_min - padding_x)
         y_min = max(0, y_min - padding_y)
         x_max = min(self.width, x_max + padding_x)
-        y_max = min(self.height, y_max + padding_y)
+        y_max = min(self.height, y_max + bottom_padding)
 
         # Return dictionary with mouth region coordinates
         return {
@@ -190,9 +227,64 @@ class LipSyncAnimator:
             'width': x_max - x_min,
             'height': y_max - y_min,
             'center_x': (x_min + x_max) // 2,
-            'center_y': (y_min + y_max) // 2
+            'center_y': (y_min + y_max) // 2,
+            'aspect_ratio': mouth_data.get('aspect_ratio', 1.0),
+            'open_ratio': mouth_data.get('open_ratio', 0.5)
         }
 
+    def select_appropriate_viseme(self, viseme_category, mouth_data):
+        """Select the most appropriate viseme image based on mouth characteristics."""
+        if not viseme_category in self.viseme_images or not self.viseme_images[viseme_category]:
+            # Fallback to a default viseme if the requested one is not available
+            for key in self.viseme_images:
+                if self.viseme_images[key]:
+                    viseme_category = key
+                    break
+            if not viseme_category in self.viseme_images:
+                return None, None
+
+        # Get all viseme images for this category
+        viseme_images = self.viseme_images[viseme_category]
+
+        # If we have mouth data, try to match the viseme based on mouth characteristics
+        if mouth_data and 'open_ratio' in mouth_data:
+            # Load all viseme images and calculate their "openness"
+            best_match = None
+            best_match_diff = float('inf')
+
+            for img_path in viseme_images:
+                # Randomly pick one if there are too many to process efficiently
+                if random.random() < 0.7 and best_match is not None:
+                    continue
+
+                # Load the image
+                img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    continue
+
+                # Simple heuristic: use the image dimensions as a proxy for mouth openness
+                if len(img.shape) == 3:
+                    # Calculate average brightness in the middle section as a proxy for openness
+                    h, w = img.shape[:2]
+                    middle_section = img[h // 3:2 * h // 3, w // 3:2 * w // 3]
+                    if len(middle_section) > 0:
+                        brightness = np.mean(middle_section)
+                        # Normalize to 0-1 range
+                        openness = brightness / 255.0
+
+                        # Compare with the actual mouth openness
+                        diff = abs(openness - mouth_data['open_ratio'])
+                        if diff < best_match_diff:
+                            best_match_diff = diff
+                            best_match = img_path
+
+            # If we found a good match, use it
+            if best_match:
+                return best_match, cv2.imread(best_match, cv2.IMREAD_UNCHANGED)
+
+        # Fallback to random selection if we couldn't find a good match
+        selected_path = random.choice(viseme_images)
+        return selected_path, cv2.imread(selected_path, cv2.IMREAD_UNCHANGED)
     def phoneme_to_viseme(self, phoneme):
         """Map phoneme to viseme based on the actual viseme folders available."""
         # Based on the loaded viseme categories from the error message
@@ -425,6 +517,61 @@ class LipSyncAnimator:
 
         return timing
 
+    def apply_viseme_to_frame(self, frame, viseme_img, mouth_region, mouth_data):
+        """Apply the viseme image to the frame with advanced blending techniques."""
+        mouth_x = mouth_region['x']
+        mouth_y = mouth_region['y']
+        mouth_width = mouth_region['width']
+        mouth_height = mouth_region['height']
+
+        # Get the region of interest from the original frame
+        roi = frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width]
+
+        # Ensure ROI dimensions match the viseme
+        if roi.shape[:2] != viseme_img.shape[:2]:
+            try:
+                viseme_img = cv2.resize(viseme_img, (roi.shape[1], roi.shape[0]))
+            except Exception as e:
+                print(f"Error resizing viseme: {e}")
+                return
+
+        # Check if viseme has alpha channel (4 channels)
+        if viseme_img.shape[2] == 4:
+            # Extract the alpha channel
+            alpha = viseme_img[:, :, 3] / 255.0
+
+            # Create a mask from alpha channel with blurred edges for smoother blending
+            mask = alpha.copy()
+            mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+            # Extract BGR channels
+            viseme_rgb = viseme_img[:, :, :3]
+
+            # For each color channel
+            for c in range(3):
+                # Blend the viseme and ROI using alpha
+                roi[:, :, c] = (1 - mask) * roi[:, :, c] + mask * viseme_rgb[:, :, c]
+
+            # Place the blended ROI back into the frame
+            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = roi
+        else:
+            # If no alpha channel, create a more sophisticated blend
+            # Create a simple mask based on non-black pixels
+            gray_viseme = cv2.cvtColor(viseme_img, cv2.COLOR_BGR2GRAY)
+            _, mask = cv2.threshold(gray_viseme, 10, 255, cv2.THRESH_BINARY)
+            mask = mask.astype(float) / 255
+
+            # Apply Gaussian blur to the mask for smoother edges
+            mask = cv2.GaussianBlur(mask, (5, 5), 0)
+
+            # Expand mask dimensions for broadcasting
+            mask = np.expand_dims(mask, axis=2)
+
+            # Blend using the mask
+            blended = (1 - mask) * roi + mask * viseme_img
+
+            # Update the frame
+            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = blended.astype(np.uint8)
     def generate_video_from_visemes(self, phoneme_timing):
         """Generate the video by overlaying viseme mouth images onto the original silent video frames."""
         # Make sure to use a widely supported codec
@@ -454,6 +601,14 @@ class LipSyncAnimator:
 
         # Store the last detected mouth region as fallback
         last_valid_mouth_region = None
+        last_valid_mouth_data = None
+
+        # Store the last used viseme path to reduce unnecessary reloading
+        last_viseme_path = None
+        last_viseme_img = None
+
+        # Create a cache for viseme images to avoid reloading
+        viseme_cache = {}
 
         # Process each frame
         for frame_idx in range(total_frames):
@@ -474,17 +629,18 @@ class LipSyncAnimator:
             frame = original_frame.copy()
 
             # Detect face and get mouth landmarks for this frame
-            mouth_landmarks = self.get_mouth_landmarks(frame)
+            mouth_data = self.get_mouth_landmarks(frame)
 
             # Get mouth region from landmarks or use the last valid region
-            if mouth_landmarks:
-                mouth_region = self.get_mouth_region(mouth_landmarks)
-                # Save this region as fallback for future frames
+            if mouth_data:
+                mouth_region = self.get_mouth_region(mouth_data)
                 if mouth_region:
                     last_valid_mouth_region = mouth_region
+                    last_valid_mouth_data = mouth_data
             else:
                 # Use the last valid mouth region if no face is detected in current frame
                 mouth_region = last_valid_mouth_region
+                mouth_data = last_valid_mouth_data
 
             # If we still don't have a valid mouth region, skip the frame
             if not mouth_region:
@@ -505,59 +661,30 @@ class LipSyncAnimator:
                     break
 
             # Only overlay viseme if we're in a speech segment
-            if is_in_speech and current_viseme and current_viseme in self.viseme_images and self.viseme_images[
-                current_viseme]:
-                # Choose a random viseme image from the appropriate category
-                viseme_image_path = random.choice(self.viseme_images[current_viseme])
-                viseme_img = cv2.imread(viseme_image_path, cv2.IMREAD_UNCHANGED)  # Read with alpha if available
+            if is_in_speech and current_viseme:
+                # Check if this viseme is already in our cache
+                if current_viseme in self.viseme_images and self.viseme_images[current_viseme]:
+                    # Select the appropriate viseme image based on mouth characteristics
+                    viseme_path, viseme_img = self.select_appropriate_viseme(current_viseme, mouth_data)
 
-                if viseme_img is not None:
-                    # Extract mouth coordinates from the detected region
-                    mouth_x = mouth_region['x']
-                    mouth_y = mouth_region['y']
-                    mouth_width = mouth_region['width']
-                    mouth_height = mouth_region['height']
+                    if viseme_img is not None:
+                        # Extract mouth coordinates from the detected region
+                        mouth_x = mouth_region['x']
+                        mouth_y = mouth_region['y']
+                        mouth_width = mouth_region['width']
+                        mouth_height = mouth_region['height']
 
-                    # Resize viseme image to fit the mouth region
-                    viseme_resized = cv2.resize(viseme_img, (mouth_width, mouth_height))
+                        # Resize viseme image to fit the mouth region
+                        viseme_resized = cv2.resize(viseme_img, (mouth_width, mouth_height))
 
-                    # Check if viseme has alpha channel (4 channels)
-                    if viseme_resized.shape[2] == 4:
-                        # Extract the alpha channel
-                        alpha = viseme_resized[:, :, 3] / 255.0
-                        # Extract BGR channels
-                        viseme_rgb = viseme_resized[:, :, :3]
+                        # Apply the viseme with advanced blending
+                        self.apply_viseme_to_frame(frame, viseme_resized, mouth_region, mouth_data)
 
-                        # Get the region of interest from the original frame
-                        roi = frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width]
-
-                        # Ensure ROI dimensions match the viseme
-                        if roi.shape[:2] == viseme_rgb.shape[:2]:
-                            # For each color channel
-                            for c in range(3):
-                                # Blend the viseme and ROI using alpha
-                                roi[:, :, c] = (1 - alpha) * roi[:, :, c] + alpha * viseme_rgb[:, :, c]
-
-                            # Place the blended ROI back into the frame
-                            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = roi
-                        else:
-                            print(
-                                f"Warning: ROI dimensions {roi.shape[:2]} don't match viseme dimensions {viseme_rgb.shape[:2]}")
+                        # Optional: Visualize phoneme/viseme for debugging
+                        # cv2.putText(frame, f"{current_phoneme}->{current_viseme}",
+                        #             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     else:
-                        # If no alpha channel, create a simple overlay with the viseme
-                        try:
-                            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = viseme_resized
-                        except ValueError as e:
-                            print(f"Error overlaying viseme: {e}")
-                            # Continue with original frame
-
-                    # Optional: Draw mouth landmarks for debugging
-                    # if mouth_landmarks:
-                    #     for point in mouth_landmarks:
-                    #         cv2.circle(frame, point, 2, (0, 255, 0), -1)
-
-                else:
-                    print(f"Warning: Could not load viseme image from {viseme_image_path}")
+                        print(f"Warning: Could not load viseme image for {current_viseme}")
 
             # Write the processed frame
             writer.write(frame)
