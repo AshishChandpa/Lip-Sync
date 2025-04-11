@@ -1,95 +1,105 @@
-"""
-Text_to_lip_animation.py with voice synthesis capabilities
-"""
-import os
 import cv2
-import dlib
 import numpy as np
-import time
-import argparse
-from pathlib import Path
 import random
-import phonemizer
+import os
+import dlib
 from phonemizer.backend import EspeakBackend
-import imageio
-from tqdm import tqdm
-import tempfile
-import subprocess
-import gtts
+from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 from pydub import AudioSegment
-from moviepy.editor import VideoFileClip, AudioFileClip
+import speech_recognition as sr
+import subprocess
+from moviepy.config import get_setting
 
 
-class TextToLipAnimation:
-    def __init__(self, input_video_path, viseme_folder, output_path="animated_output.mp4"):
-        """
-        Initialize the Text to Lip Animation generator with voice synthesis
+def convert_video(input_file, output_file):
+    """Convert the video to a different format using FFmpeg."""
+    # Ensure the paths are absolute
+    input_file = os.path.abspath(input_file)
+    output_file = os.path.abspath(output_file)
 
-        Args:
-            input_video_path (str): Path to the video with a person not speaking
-            viseme_folder (str): Path to the folder containing viseme images
-            output_path (str): Path to save the output animated video
-        """
-        self.input_video_path = input_video_path
+    print(f"Converting video from {input_file} to {output_file}")
+
+    # Use a more robust FFmpeg command with explicit codec specifications
+    cmd = [
+        get_setting("FFMPEG_BINARY"),
+        "-i", input_file,
+        "-c:v", "libx264",  # Force video codec to H.264
+        "-preset", "medium",  # Encoding preset (speed/quality tradeoff)
+        "-pix_fmt", "yuv420p",  # Standard pixel format for better compatibility
+        "-r", "30",  # Ensure the frame rate is set
+        output_file
+    ]
+
+    popen_params = {
+        "bufsize": 10 ** 5,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+    }
+
+    if os.name == "nt":
+        popen_params["creationflags"] = 0x08000000
+
+    try:
+        # Execute the conversion process
+        proc = subprocess.Popen(cmd, **popen_params)
+        stdout, stderr = proc.communicate()
+
+        # Check if the process was successful
+        if proc.returncode != 0:
+            raise RuntimeError(f"Video conversion failed with error:\n{stderr.decode()}")
+
+        print(f"Video conversion successful: {output_file}")
+        return output_file
+    except Exception as e:
+        # Log any exceptions that occur
+        print(f"An error occurred during video conversion: {e}")
+        return None
+
+
+class LipSyncAnimator:
+    def __init__(self, input_video, audio_file, viseme_folder, output_video, predictor_path, fps=30, resolution=None):
+        self.input_video = input_video
+        self.audio_file = audio_file
         self.viseme_folder = viseme_folder
-        self.output_path = output_path
-        self.temp_video_path = os.path.splitext(output_path)[0] + "_temp.mp4"
-        self.temp_audio_path = os.path.splitext(output_path)[0] + "_speech.mp3"
+        self.output_video = output_video
+        self.fps = fps
+        self.predictor_path = predictor_path
 
-        # Create the espeak backend for phonemizing text
+        # Initialize facial landmark detector
+        self.detector = dlib.get_frontal_face_detector()
+        self.predictor = dlib.shape_predictor(predictor_path)
+
+        # Initialize phonemizer
         self.backend = EspeakBackend('en-us')
 
-        # Viseme category mapping
-        self.viseme_categories = {
-            'A': ['AA', 'AE', 'AH'],  # as in "car", "cat", "cut"
-            'E': ['EH', 'ER', 'EY'],  # as in "met", "bird", "say"
-            'I': ['IH', 'IY'],  # as in "sit", "see"
-            'O': ['AO', 'OW'],  # as in "dog", "go"
-            'U': ['UH', 'UW'],  # as in "book", "too"
-            'BMP': ['B', 'M', 'P'],  # Bilabial consonants
-            'FV': ['F', 'V'],  # Labiodental consonants
-            'CH-J-SH': ['CH', 'JH', 'SH', 'ZH'],  # Postalveolar consonants
-            'TH': ['DH', 'TH'],  # Dental consonants
-            'L': ['L'],  # Alveolar lateral approximant
-            'R': ['R'],  # Alveolar approximant
-            'S-Z': ['S', 'Z'],  # Alveolar sibilants
-            'D-N-T': ['D', 'N', 'T'],  # Alveolar plosives and nasal
-            'G-K-NG': ['G', 'K', 'NG'],  # Velar consonants
-            'H-Y': ['HH', 'Y'],  # Glottal and palatal
-            'Rest': ['sil', 'sp']  # Silence/rest position
-        }
+        # Video and audio info
+        self.video = cv2.VideoCapture(input_video)
+        self.audio = AudioSegment.from_file(audio_file)
 
-        # Initialize dlib face detector and predictor
-        self.detector = dlib.get_frontal_face_detector()
-        try:
-            predictor_path = "shape_predictor_68_face_landmarks.dat"
-            if not os.path.exists(predictor_path):
-                alternate_paths = [
-                    "./shape_predictor_68_face_landmarks.dat",
-                    os.path.join(os.path.dirname(__file__), "shape_predictor_68_face_landmarks.dat"),
-                    os.path.abspath("shape_predictor_68_face_landmarks.dat")
-                ]
-                for alt_path in alternate_paths:
-                    if os.path.exists(alt_path):
-                        predictor_path = alt_path
-                        print(f"Found predictor file at: {predictor_path}")
-                        break
-            self.predictor = dlib.shape_predictor(predictor_path)
-        except Exception as e:
-            print(f"Warning: Could not load facial landmark predictor: {e}")
-            print("Continuing without facial landmark detection.")
-            self.predictor = None
+        # Get video properties
+        self.width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # Load viseme images
+        # Set the resolution to match the input video if not specified
+        if resolution:
+            self.resolution = resolution
+        elif self.width > 0 and self.height > 0:
+            self.resolution = (self.width, self.height)
+        else:
+            self.resolution = (640, 480)  # Default fallback
+
+        # Check if the viseme folder exists
+        if not os.path.exists(viseme_folder):
+            raise ValueError(f"Viseme folder {viseme_folder} not found!")
+
         self.viseme_images = self.load_viseme_images()
 
-    def load_viseme_images(self):
-        """
-        Load all viseme images from the viseme folder
+        # Print available viseme categories after loading
+        print("Available viseme categories:", list(self.viseme_images.keys()))
 
-        Returns:
-            dict: Dictionary mapping viseme categories to lists of image paths
-        """
+    def load_viseme_images(self):
+        """Load all viseme images from the viseme folder."""
         viseme_images = {}
 
         # Check if the viseme folder exists
@@ -113,563 +123,562 @@ class TextToLipAnimation:
             ]
 
             if image_files:
+                # Normalize category name to uppercase for case-insensitive matching
                 viseme_images[category] = image_files
                 print(f"Loaded {len(image_files)} images for viseme '{category}'")
 
         if not viseme_images:
             print("Warning: No viseme images found. Check your viseme folder structure.")
-            print(f"Expected structure: {self.viseme_folder}/[VISEME_CATEGORY]/[image_files]")
-
         return viseme_images
 
-    def phoneme_to_viseme(self, phoneme):
-        """
-        Convert a phoneme to its corresponding viseme category
-
-        Args:
-            phoneme (str): The phoneme to convert
-
-        Returns:
-            str: The viseme category
-        """
-        # Clean up the phoneme
-        phoneme = phoneme.upper().replace('.', '').strip()
-
-        # Remove stress markers (numbers)
-        phoneme = ''.join([c for c in phoneme if not c.isdigit()])
-
-        # Handle espeak specific notation
-        phoneme_mapping = {
-            'A:': 'AA', 'A': 'AE', 'V': 'AH', 'O:': 'AO', 'E': 'EH',
-            'E@': 'ER', 'EI': 'EY', 'I': 'IH', 'I:': 'IY', 'O': 'OW',
-            'U': 'UH', 'U:': 'UW', 'AI': 'AY', 'OI': 'OY', 'AU': 'AW'
-        }
-
-        if phoneme in phoneme_mapping:
-            phoneme = phoneme_mapping[phoneme]
-
-        # First check for exact matches
-        for viseme, phoneme_list in self.viseme_categories.items():
-            if phoneme in phoneme_list:
-                return viseme
-
-        # If no exact match, try partial matches
-        for viseme, phoneme_list in self.viseme_categories.items():
-            for p in phoneme_list:
-                if p in phoneme or phoneme in p:
-                    return viseme
-
-        # Special case handling
-        if any(p in phoneme for p in ['SIL', 'SP', 'PAUSE', '_', '-']):
-            return 'Rest'
-
-        # First character heuristic
-        first_char = phoneme[0] if phoneme else ''
-
-        if first_char in ['B', 'M', 'P']:
-            return 'BMP'
-        elif first_char in ['F', 'V']:
-            return 'FV'
-        elif first_char in ['S', 'Z']:
-            return 'S-Z'
-        elif first_char in ['T', 'D', 'N']:
-            return 'D-N-T'
-        elif first_char in ['A']:
-            return 'A'
-        elif first_char in ['E']:
-            return 'E'
-        elif first_char in ['I']:
-            return 'I'
-        elif first_char in ['O']:
-            return 'O'
-        elif first_char in ['U']:
-            return 'U'
-
-        # Default to Rest if no match
-        return 'Rest'
-
-    def text_to_phonemes(self, text):
-        """
-        Convert text to a sequence of phonemes with timing information
-
-        Args:
-            text (str): Input text to convert to phonemes
-
-        Returns:
-            list: List of (phoneme, duration) pairs
-        """
-        # Phonemize the text
-        phonemes = self.backend.phonemize([text], strip=True)[0].split()
-
-        # Estimate durations for each phoneme
-        # These values are approximate - adjust for realistic speech timing
-        phoneme_durations = []
-
-        for phoneme in phonemes:
-            # Assign duration based on phoneme type (vowels longer than consonants)
-            if phoneme.upper() in ['A:', 'E:', 'I:', 'O:', 'U:', 'AA', 'AE', 'AH', 'AO', 'EH', 'ER', 'EY', 'IH', 'IY',
-                                   'OW', 'UH', 'UW']:
-                # Vowels are longer
-                duration = random.uniform(0.1, 0.22)  # 100-220ms
-            elif phoneme.upper() in ['SIL', 'SP', '.', ',', '?', '!']:
-                # Pauses
-                duration = random.uniform(0.2, 0.5)  # 200-500ms
-            else:
-                # Consonants are shorter
-                duration = random.uniform(0.05, 0.15)  # 50-150ms
-
-            phoneme_durations.append((phoneme, duration))
-
-        return phoneme_durations
-
-    def generate_speech(self, text, output_path):
-        """
-        Generate speech audio from text using gTTS
-
-        Args:
-            text (str): Text to convert to speech
-            output_path (str): Path to save the generated audio file
-
-        Returns:
-            float: Duration of the generated audio in seconds
-        """
-        print(f"Generating speech audio for: {text[:50]}{'...' if len(text) > 50 else ''}")
-
-        try:
-            # Generate speech using Google Text-to-Speech
-            tts = gtts.gTTS(text=text, lang='en', slow=False)
-            tts.save(output_path)
-
-            # Get the duration of the audio file
-            audio = AudioSegment.from_file(output_path)
-            duration = len(audio) / 1000.0  # Convert ms to seconds
-
-            print(f"Speech generation complete. Duration: {duration:.2f} seconds")
-            return duration
-        except Exception as e:
-            print(f"Error generating speech: {e}")
-            # Create a silent audio file of appropriate length as fallback
-            estimated_duration = len(text.split()) * 0.3  # Rough estimate: 0.3 seconds per word
-            silence = AudioSegment.silent(duration=int(estimated_duration * 1000))
-            silence.export(output_path, format="mp3")
-            print(f"Created silent audio as fallback. Duration: {estimated_duration:.2f} seconds")
-            return estimated_duration
-
-    def get_face_landmarks(self, frame):
-        """
-        Get facial landmarks for a frame
-
-        Args:
-            frame: Video frame
-
-        Returns:
-            tuple: (face_rect, landmarks) or None if no face detected
-        """
-        if self.predictor is None:
-            return None
-
-        # Convert to grayscale for face detection
+    def get_mouth_landmarks(self, frame):
+        """Detect face and extract mouth landmarks using dlib."""
+        # Convert frame to grayscale for better face detection
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Detect faces
-        faces = self.detector(gray)
+        # Detect faces in the grayscale frame
+        faces = self.detector(gray, 0)
 
-        if not faces:
+        # If no faces detected, return None
+        if len(faces) == 0:
             return None
 
-        # Get the first face
+        # Get the first face (assuming only one face in the video)
         face = faces[0]
 
-        # Get facial landmarks
+        # Predict facial landmarks
         landmarks = self.predictor(gray, face)
 
-        return (face, landmarks)
-
-    def get_mouth_roi(self, frame, landmarks):
-        """
-        Extract the region of interest (ROI) containing the mouth
-
-        Args:
-            frame: Video frame
-            landmarks: Facial landmarks
-
-        Returns:
-            tuple: (mouth_roi, (x_min, y_min, x_max, y_max)) - ROI and its coordinates
-        """
-        # Get the mouth landmarks (points 48-68)
+        # Extract mouth landmarks (points 48-68 in the 68-point model)
         mouth_points = []
         for i in range(48, 68):
             point = landmarks.part(i)
             mouth_points.append((point.x, point.y))
 
-        # Find the bounding box of the mouth
-        x_min = min(point[0] for point in mouth_points)
-        y_min = min(point[1] for point in mouth_points)
-        x_max = max(point[0] for point in mouth_points)
-        y_max = max(point[1] for point in mouth_points)
+        return mouth_points
 
-        # Add some margin
-        margin = 10
-        x_min = max(0, x_min - margin)
-        y_min = max(0, y_min - margin)
-        x_max = min(frame.shape[1], x_max + margin)
-        y_max = min(frame.shape[0], y_max + margin)
+    def get_mouth_region(self, mouth_landmarks):
+        """Calculate mouth region (rectangle) from landmarks."""
+        if not mouth_landmarks:
+            return None
 
-        # Crop the mouth region
-        mouth_roi = frame[y_min:y_max, x_min:x_max]
+        # Convert landmarks to numpy array
+        points = np.array(mouth_landmarks)
 
-        return mouth_roi, (x_min, y_min, x_max, y_max)
+        # Get the bounding rectangle with some padding
+        x_min = np.min(points[:, 0])
+        y_min = np.min(points[:, 1])
+        x_max = np.max(points[:, 0])
+        y_max = np.max(points[:, 1])
 
-    def blend_mouth(self, frame, viseme_img, mouth_coords, alpha=0.7):
-        """
-        Blend a viseme mouth image onto the original frame
+        # Add padding around the mouth (20% extra width and height)
+        width = x_max - x_min
+        height = y_max - y_min
 
-        Args:
-            frame: Original video frame
-            viseme_img: Viseme mouth image to blend
-            mouth_coords: (x_min, y_min, x_max, y_max) of the mouth region
-            alpha: Blending factor (0.0-1.0)
+        padding_x = int(width * 0.2)
+        padding_y = int(height * 0.2)
 
-        Returns:
-            numpy.ndarray: Frame with blended mouth
-        """
-        x_min, y_min, x_max, y_max = mouth_coords
+        x_min = max(0, x_min - padding_x)
+        y_min = max(0, y_min - padding_y)
+        x_max = min(self.width, x_max + padding_x)
+        y_max = min(self.height, y_max + padding_y)
 
-        # Get dimensions
-        h, w = y_max - y_min, x_max - x_min
+        # Return dictionary with mouth region coordinates
+        return {
+            'x': x_min,
+            'y': y_min,
+            'width': x_max - x_min,
+            'height': y_max - y_min,
+            'center_x': (x_min + x_max) // 2,
+            'center_y': (y_min + y_max) // 2
+        }
 
-        # Resize viseme image to match mouth dimensions
+    def phoneme_to_viseme(self, phoneme):
+        """Map phoneme to viseme based on the actual viseme folders available."""
+        # Based on the loaded viseme categories from the error message
+        phoneme_mapping = {
+            # Vowels
+            'AA': 'A', 'AE': 'A', 'AH': 'A', 'AO': 'O', 'AW': 'A', 'AY': 'A',
+            'EH': 'E', 'ER': 'E', 'EY': 'E', 'IH': 'I', 'IY': 'I',
+            'UH': 'U', 'UW': 'U', 'OW': 'O', 'OY': 'O',
+
+            # Consonants
+            'B': 'BMP', 'M': 'BMP', 'P': 'BMP',
+            'CH': 'CH-J-SH', 'JH': 'CH-J-SH', 'SH': 'CH-J-SH', 'ZH': 'CH-J-SH',
+            'D': 'D-N-T', 'N': 'D-N-T', 'T': 'D-N-T',
+            'DH': 'TH', 'TH': 'TH',
+            'F': 'FV', 'V': 'FV',
+            'G': 'G-K-NG', 'K': 'G-K-NG', 'NG': 'G-K-NG',
+            'HH': 'H-Y', 'Y': 'H-Y',
+            'L': 'L', 'R': 'R',
+            'S': 'S-Z', 'Z': 'S-Z',
+            'W': 'U',
+
+            # Silence and pauses
+            'SIL': 'Rest', 'SP': 'Rest'
+        }
+
+        # Get the mapped viseme or use 'Rest' as fallback
+        viseme = phoneme_mapping.get(phoneme, 'Rest')
+
+        # Check if the mapped viseme exists in our loaded images, if not use a fallback
+        if viseme not in self.viseme_images:
+            # Try case-insensitive matching
+            for key in self.viseme_images.keys():
+                if key.lower() == viseme.lower():
+                    return key
+
+            # If still not found, use an alternative or default
+            if viseme == 'Rest' and 'Rest' not in self.viseme_images:
+                # Find a suitable alternative for 'Rest'
+                alternatives = ['debug', 'A']  # Try these alternatives in order
+                for alt in alternatives:
+                    if alt in self.viseme_images:
+                        print(f"Using '{alt}' as fallback for 'Rest'")
+                        return alt
+
+            # Default fallback to the first available viseme
+            if self.viseme_images:
+                first_key = list(self.viseme_images.keys())[0]
+                print(f"Viseme '{viseme}' not found, using '{first_key}' as fallback")
+                return first_key
+
+        return viseme
+
+    def extract_audio_transcript(self):
+        """Extract the transcript from the audio file using SpeechRecognition."""
+        recognizer = sr.Recognizer()
+
+        # Load the audio file for transcription
+        audio = sr.AudioFile(self.audio_file)
+
+        with audio as source:
+            audio_data = recognizer.record(source)
+
         try:
-            resized_viseme = cv2.resize(viseme_img, (w, h), interpolation=cv2.INTER_LANCZOS4)
+            # Use Google Web Speech API to transcribe the audio
+            transcript = recognizer.recognize_google(audio_data)
+            print(f"Transcription: {transcript}")
+            return transcript
+        except sr.UnknownValueError:
+            print("Google Speech Recognition could not understand the audio")
+            return None
+        except sr.RequestError as e:
+            print(f"Could not request results from Google Speech Recognition service; {e}")
+            return None
+
+    def extract_phoneme_timing(self, transcript):
+        """Extract phoneme timing from transcript with silence detection."""
+        try:
+            # Convert text to phonemes using phonemizer
+            phonemes = self.backend.phonemize([transcript], strip=True)[0].split()
+            print(f"Phonemized text: {phonemes}")
+
+            phoneme_timing = []
+            audio_duration_ms = len(self.audio)  # in milliseconds
+            audio_duration_sec = audio_duration_ms / 1000.0  # Convert to seconds
+
+            # Detect silent parts using audio energy
+            silence_threshold = -35  # dB, adjust based on your audio characteristics
+            chunk_size = 100  # ms
+            silence_min_duration = 300  # ms minimum silence duration to consider
+
+            # Process audio to find silence regions
+            silence_regions = []
+            current_silence_start = None
+
+            for i in range(0, len(self.audio), chunk_size):
+                chunk = self.audio[i:i + chunk_size]
+                if len(chunk) == 0:
+                    continue
+
+                # Calculate dB level
+                if chunk.dBFS < silence_threshold:
+                    # This is silence
+                    if current_silence_start is None:
+                        current_silence_start = i / 1000.0  # convert to seconds
+                else:
+                    # This is speech
+                    if current_silence_start is not None:
+                        silence_end = i / 1000.0
+                        if (silence_end - current_silence_start) >= (silence_min_duration / 1000.0):
+                            silence_regions.append((current_silence_start, silence_end))
+                        current_silence_start = None
+
+            # Add final silence region if applicable
+            if current_silence_start is not None:
+                silence_end = audio_duration_sec
+                if (silence_end - current_silence_start) >= (silence_min_duration / 1000.0):
+                    silence_regions.append((current_silence_start, silence_end))
+
+            print(f"Detected {len(silence_regions)} silence regions: {silence_regions}")
+
+            # Calculate speech regions (inverse of silence regions)
+            speech_regions = []
+            last_end = 0
+
+            for start, end in sorted(silence_regions):
+                if start > last_end:
+                    speech_regions.append((last_end, start))
+                last_end = end
+
+            # Add final speech region if needed
+            if last_end < audio_duration_sec:
+                speech_regions.append((last_end, audio_duration_sec))
+
+            print(f"Calculated {len(speech_regions)} speech regions: {speech_regions}")
+
+            # If no speech regions detected, fall back to using the entire audio
+            if not speech_regions:
+                speech_regions = [(0, audio_duration_sec)]
+
+            # Distribute phonemes across speech regions
+            total_speech_duration = sum(end - start for start, end in speech_regions)
+            phonemes_per_second = len(phonemes) / max(total_speech_duration, 0.1)
+
+            phoneme_idx = 0
+            for start, end in speech_regions:
+                region_duration = end - start
+                # Calculate number of phonemes in this speech region
+                num_phonemes_in_region = max(1, int(round(region_duration * phonemes_per_second)))
+                num_phonemes_in_region = min(num_phonemes_in_region, len(phonemes) - phoneme_idx)
+
+                if num_phonemes_in_region <= 0:
+                    continue
+
+                # Calculate phoneme duration in this region
+                phoneme_duration = region_duration / num_phonemes_in_region
+
+                # Assign timings to phonemes in this region
+                for i in range(num_phonemes_in_region):
+                    if phoneme_idx >= len(phonemes):
+                        break
+
+                    phoneme = phonemes[phoneme_idx]
+                    phoneme_start = start + (i * phoneme_duration)
+                    phoneme_end = phoneme_start + phoneme_duration
+
+                    # Get the viseme for this phoneme
+                    viseme = self.phoneme_to_viseme(phoneme)
+
+                    phoneme_timing.append({
+                        'phoneme': phoneme,
+                        'viseme': viseme,
+                        'start': phoneme_start,
+                        'end': phoneme_end
+                    })
+
+                    phoneme_idx += 1
+
+            # Print some timing info for debugging
+            print(f"Audio duration: {audio_duration_sec} seconds")
+            print(f"Total phonemes: {len(phonemes)}")
+            print(f"Phonemes assigned: {phoneme_idx}")
+            print(f"Phoneme timing entries: {len(phoneme_timing)}")
+
+            return phoneme_timing
         except Exception as e:
-            print(f"Error resizing viseme image: {e}")
-            return frame
+            print(f"Error during phoneme timing extraction: {e}")
+            # Return a simple fallback timing if phonemization failed
+            return self.create_fallback_timing(transcript)
 
-        # Create a mask for better blending (focus on mouth area)
-        mask = np.zeros((h, w), dtype=np.float32)
-        center = (w // 2, h // 2)
-        cv2.ellipse(mask, center, (w // 2 - 5, h // 2 - 5), 0, 0, 360, 1, -1)
-        mask = cv2.GaussianBlur(mask, (11, 11), 0)
+    def create_fallback_timing(self, transcript):
+        """Create a simple fallback timing when phonemization fails."""
+        print("Using fallback timing generation...")
 
-        # Extract the mouth region from the original frame
-        roi = frame[y_min:y_max, x_min:x_max].copy()
+        # Use words for timing if phonemization failed
+        words = transcript.split()
+        total_duration_ms = len(self.audio)
+        word_duration = total_duration_ms / max(1, len(words)) / 1000.0  # in seconds
 
-        # Apply mask-weighted blending
-        for c in range(3):  # RGB channels
-            roi[:, :, c] = (1 - mask * alpha) * roi[:, :, c] + mask * alpha * resized_viseme[:, :, c]
+        timing = []
+        start_time = 0.0
 
-        # Put the blended region back into the frame
-        result = frame.copy()
-        result[y_min:y_max, x_min:x_max] = roi
+        for word in words:
+            # For each word, assign a viseme
+            end_time = start_time + word_duration
 
-        return result
+            # Choose a viseme based on the first letter of the word (simplified approach)
+            first_char = word[0].upper() if word else 'A'
+            if first_char in 'AEIOU':
+                viseme = first_char  # Use vowel directly
+            elif first_char in 'BMP':
+                viseme = 'BMP'
+            elif first_char in 'DTN':
+                viseme = 'D-N-T'
+            elif first_char in 'GKNG':
+                viseme = 'G-K-NG'
+            else:
+                viseme = 'A'  # Default to 'A' as fallback
 
-    def animate_from_text(self, text, words_per_minute=150):
-        """
-        Create a lip-synced animation from text with speech
+            # Ensure the viseme exists in our loaded images
+            viseme = self.phoneme_to_viseme(viseme)
 
-        Args:
-            text (str): Text to animate
-            words_per_minute (int): Speaking rate
+            timing.append({
+                'phoneme': word,
+                'viseme': viseme,
+                'start': start_time,
+                'end': end_time
+            })
 
-        Returns:
-            bool: True if animation was created successfully
-        """
-        # Check if we have viseme images
-        if not self.viseme_images:
-            print("Error: No viseme images available. Animation cannot be created.")
+            start_time = end_time
+
+        return timing
+
+    def generate_video_from_visemes(self, phoneme_timing):
+        """Generate the video by overlaying viseme mouth images onto the original silent video frames."""
+        # Make sure to use a widely supported codec
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Video codec ('mp4v')
+
+        # Ensure output directory exists
+        output_dir = os.path.dirname(self.output_video)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        writer = cv2.VideoWriter(self.output_video, fourcc, self.fps, self.resolution)
+
+        # Check if writer opened successfully
+        if not writer.isOpened():
+            print(f"Error: Could not open video writer for {self.output_video}")
             return False
 
-        # Generate speech audio
-        audio_duration = self.generate_speech(text, self.temp_audio_path)
+        total_frames = int(self.audio.duration_seconds * self.fps)
 
-        # Convert text to phonemes with timing
-        print("Converting text to phonemes...")
-        phoneme_durations = self.text_to_phonemes(text)
+        # Reset video capture to start
+        self.video.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-        # Convert phonemes to visemes
-        viseme_sequence = []
-        estimated_duration = 0
+        print(f"Generating {total_frames} frames in the video...")
 
-        for phoneme, duration in phoneme_durations:
-            viseme = self.phoneme_to_viseme(phoneme)
-            viseme_sequence.append((viseme, duration))
-            estimated_duration += duration
+        # Add a small constant for floating point comparison safety
+        epsilon = 0.001
 
-        print(f"Generated {len(viseme_sequence)} visemes with estimated duration of {estimated_duration:.2f} seconds")
+        # Store the last detected mouth region as fallback
+        last_valid_mouth_region = None
 
-        # Adjust phoneme durations to match actual audio duration
-        if estimated_duration > 0 and audio_duration > 0:
-            scale_factor = audio_duration / estimated_duration
-            viseme_sequence = [(viseme, duration * scale_factor) for viseme, duration in viseme_sequence]
-            print(f"Adjusted viseme durations to match audio duration of {audio_duration:.2f} seconds")
-            estimated_duration = audio_duration
+        # Process each frame
+        for frame_idx in range(total_frames):
+            # Get the current time for the frame
+            current_time = frame_idx / self.fps
 
-        # Open the input video
-        print(f"Opening input video: {self.input_video_path}")
-        video = cv2.VideoCapture(self.input_video_path)
-
-        if not video.isOpened():
-            print(f"Error: Could not open input video {self.input_video_path}")
-            return False
-
-        # Get video properties
-        fps = video.get(cv2.CAP_PROP_FPS)
-        width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        print(f"Video properties: {width}x{height}, {fps} fps, {frame_count} frames")
-
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(self.temp_video_path, fourcc, fps, (width, height))
-
-        # Calculate frames needed for the animation
-        frames_needed = int(estimated_duration * fps)
-
-        # Check if input video has enough frames
-        if frames_needed > frame_count:
-            print(f"Warning: Text animation requires {frames_needed} frames, but video only has {frame_count} frames.")
-            print("The video will loop to accommodate the full animation.")
-
-        # Process animation
-        print("Creating animation...")
-        current_frame = 0
-        processed_frames = 0
-        viseme_idx = 0
-        time_in_current_viseme = 0
-
-        # Default mouth coordinates if face detection fails
-        default_mouth_coords = (width // 3, height // 2, 2 * width // 3, 3 * height // 4)
-        mouth_coords = default_mouth_coords
-
-        # Store face landmark detection result to reuse when detection fails
-        last_successful_landmarks = None
-
-        progress_bar = tqdm(total=frames_needed)
-
-        while processed_frames < frames_needed:
-            # Read frame
-            video.set(cv2.CAP_PROP_POS_FRAMES, current_frame % frame_count)
-            ret, frame = video.read()
-
+            # Read the corresponding frame from the silence video
+            ret, original_frame = self.video.read()
             if not ret:
-                print("Error reading frame. Exiting.")
-                break
+                # If we've reached the end of the input video, reset to the beginning
+                self.video.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, original_frame = self.video.read()
+                if not ret:
+                    print(f"Error: Could not read frame from video.")
+                    break  # End of video
 
-            # Get the current viseme
-            current_viseme, viseme_duration = viseme_sequence[viseme_idx]
+            # Use original frame as the base frame
+            frame = original_frame.copy()
 
-            # Try to detect face landmarks
-            landmark_result = self.get_face_landmarks(frame)
+            # Detect face and get mouth landmarks for this frame
+            mouth_landmarks = self.get_mouth_landmarks(frame)
 
-            if landmark_result:
-                face, landmarks = landmark_result
-                last_successful_landmarks = landmarks
-                _, mouth_coords = self.get_mouth_roi(frame, landmarks)
-            elif last_successful_landmarks is not None:
-                # Use the last successful detection
-                _, mouth_coords = self.get_mouth_roi(frame, last_successful_landmarks)
+            # Get mouth region from landmarks or use the last valid region
+            if mouth_landmarks:
+                mouth_region = self.get_mouth_region(mouth_landmarks)
+                # Save this region as fallback for future frames
+                if mouth_region:
+                    last_valid_mouth_region = mouth_region
+            else:
+                # Use the last valid mouth region if no face is detected in current frame
+                mouth_region = last_valid_mouth_region
 
-            # Select a random viseme image for the current category
-            if current_viseme in self.viseme_images and self.viseme_images[current_viseme]:
-                viseme_img_path = random.choice(self.viseme_images[current_viseme])
-                viseme_img = cv2.imread(viseme_img_path)
+            # If we still don't have a valid mouth region, skip the frame
+            if not mouth_region:
+                print(f"Warning: No face detected in frame {frame_idx}")
+                writer.write(frame)
+                continue
+
+            # Check if the current time is within any phoneme segment
+            is_in_speech = False
+            current_viseme = None
+            current_phoneme = None
+
+            for timing in phoneme_timing:
+                if timing['start'] - epsilon <= current_time <= timing['end'] + epsilon:
+                    is_in_speech = True
+                    current_viseme = timing['viseme']
+                    current_phoneme = timing['phoneme']
+                    break
+
+            # Only overlay viseme if we're in a speech segment
+            if is_in_speech and current_viseme and current_viseme in self.viseme_images and self.viseme_images[
+                current_viseme]:
+                # Choose a random viseme image from the appropriate category
+                viseme_image_path = random.choice(self.viseme_images[current_viseme])
+                viseme_img = cv2.imread(viseme_image_path, cv2.IMREAD_UNCHANGED)  # Read with alpha if available
 
                 if viseme_img is not None:
-                    # Blend the viseme mouth onto the frame
-                    frame = self.blend_mouth(frame, viseme_img, mouth_coords)
-            else:
-                # If no image available for this viseme, use 'Rest' or continue without modification
-                if 'Rest' in self.viseme_images and self.viseme_images['Rest']:
-                    viseme_img_path = random.choice(self.viseme_images['Rest'])
-                    viseme_img = cv2.imread(viseme_img_path)
+                    # Extract mouth coordinates from the detected region
+                    mouth_x = mouth_region['x']
+                    mouth_y = mouth_region['y']
+                    mouth_width = mouth_region['width']
+                    mouth_height = mouth_region['height']
 
-                    if viseme_img is not None:
-                        frame = self.blend_mouth(frame, viseme_img, mouth_coords)
+                    # Resize viseme image to fit the mouth region
+                    viseme_resized = cv2.resize(viseme_img, (mouth_width, mouth_height))
 
-            # Write the frame
+                    # Check if viseme has alpha channel (4 channels)
+                    if viseme_resized.shape[2] == 4:
+                        # Extract the alpha channel
+                        alpha = viseme_resized[:, :, 3] / 255.0
+                        # Extract BGR channels
+                        viseme_rgb = viseme_resized[:, :, :3]
+
+                        # Get the region of interest from the original frame
+                        roi = frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width]
+
+                        # Ensure ROI dimensions match the viseme
+                        if roi.shape[:2] == viseme_rgb.shape[:2]:
+                            # For each color channel
+                            for c in range(3):
+                                # Blend the viseme and ROI using alpha
+                                roi[:, :, c] = (1 - alpha) * roi[:, :, c] + alpha * viseme_rgb[:, :, c]
+
+                            # Place the blended ROI back into the frame
+                            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = roi
+                        else:
+                            print(
+                                f"Warning: ROI dimensions {roi.shape[:2]} don't match viseme dimensions {viseme_rgb.shape[:2]}")
+                    else:
+                        # If no alpha channel, create a simple overlay with the viseme
+                        try:
+                            frame[mouth_y:mouth_y + mouth_height, mouth_x:mouth_x + mouth_width] = viseme_resized
+                        except ValueError as e:
+                            print(f"Error overlaying viseme: {e}")
+                            # Continue with original frame
+
+                    # Optional: Draw mouth landmarks for debugging
+                    # if mouth_landmarks:
+                    #     for point in mouth_landmarks:
+                    #         cv2.circle(frame, point, 2, (0, 255, 0), -1)
+
+                else:
+                    print(f"Warning: Could not load viseme image from {viseme_image_path}")
+
+            # Write the processed frame
             writer.write(frame)
 
-            # Update time and viseme index
-            time_in_current_viseme += 1.0 / fps
-            if time_in_current_viseme >= viseme_duration:
-                viseme_idx = (viseme_idx + 1) % len(viseme_sequence)
-                time_in_current_viseme = 0
-
-            # Move to next frame
-            current_frame += 1
-            processed_frames += 1
-            progress_bar.update(1)
-
-        progress_bar.close()
-
-        # Release resources
-        video.release()
+        # Release the writer
         writer.release()
-
-        # Combine video and audio
-        print("Combining animation with speech audio...")
-        self.combine_video_and_audio(self.temp_video_path, self.temp_audio_path, self.output_path)
-
-        # Clean up temporary files
-        if os.path.exists(self.temp_video_path):
-            os.remove(self.temp_video_path)
-
-        print(f"Animation with speech complete! Output saved to {self.output_path}")
+        print(f"Video written successfully to {self.output_video}")
         return True
 
-    def combine_video_and_audio(self, video_path, audio_path, output_path):
-        """
-        Combine video and audio into a single file
-
-        Args:
-            video_path (str): Path to video file
-            audio_path (str): Path to audio file
-            output_path (str): Path to save the combined file
-        """
+    def merge_video_and_audio(self):
+        """Merge the generated video with the original audio to create the final lip sync video."""
         try:
-            # Load the video and audio clips
-            video_clip = VideoFileClip(video_path)
-            audio_clip = AudioFileClip(audio_path)
+            # Skip the FFmpeg conversion step and directly use MoviePy
+            print(f"Loading video file: {self.output_video}")
+            video_clip = VideoFileClip(self.output_video)
 
-            # Set the audio of the video clip
-            video_with_audio = video_clip.set_audio(audio_clip)
+            print(f"Loading audio file: {self.audio_file}")
+            audio_clip = AudioFileClip(self.audio_file)
 
-            # Write the result to a file
-            video_with_audio.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile='temp-audio.m4a',
-                remove_temp=True
+            # Adjust video duration to match audio if needed
+            if video_clip.duration != audio_clip.duration:
+                print(
+                    f"Video duration ({video_clip.duration}s) doesn't match audio duration ({audio_clip.duration}s). Adjusting...")
+                # Trim or loop the video if needed
+                if video_clip.duration > audio_clip.duration:
+                    video_clip = video_clip.subclip(0, audio_clip.duration)
+                else:
+                    # If video is shorter, loop it
+                    loops_needed = int(audio_clip.duration / video_clip.duration) + 1
+                    video_clip = concatenate_videoclips([video_clip] * loops_needed).subclip(0, audio_clip.duration)
+
+            # Set the audio to the video
+            final_clip = video_clip.set_audio(audio_clip)
+
+            # Create output filename
+            final_output = f"final_{self.output_video}"
+
+            # Write the final output with explicit codec settings
+            print(f"Writing final video to {final_output}")
+            final_clip.write_videofile(
+                final_output,
+                codec="libx264",
+                audio_codec="aac",
+                fps=self.fps,
+                preset="medium",
+                ffmpeg_params=["-pix_fmt", "yuv420p"]  # Ensure compatible pixel format
             )
 
-            # Close the clips
-            video_clip.close()
-            audio_clip.close()
+            print(f"Final video saved as {final_output}")
+            return True
 
         except Exception as e:
-            print(f"Error combining video and audio: {e}")
-            print("Trying alternative method with FFmpeg...")
-
-            try:
-                # Alternative method using FFmpeg directly
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-i', video_path,
-                    '-i', audio_path,
-                    '-c:v', 'copy',
-                    '-c:a', 'aac',
-                    '-map', '0:v:0',
-                    '-map', '1:a:0',
-                    '-shortest',
-                    output_path
-                ]
-                subprocess.run(cmd, check=True)
-            except Exception as e2:
-                print(f"Error with alternative method: {e2}")
-                print("Keeping silent video as output.")
-                # If all else fails, just rename the video file
-                import shutil
-                shutil.copy(video_path, output_path)
-
-    def create_preview_gif(self, duration=5.0):
-        """
-        Create a preview GIF of the animation
-
-        Args:
-            duration (float): Duration of the preview in seconds
-
-        Returns:
-            str: Path to the created GIF file
-        """
-        # Check if output video exists
-        if not os.path.exists(self.output_path):
-            print("Error: Output video not found. Create animation first.")
-            return None
-
-        # Create output gif path
-        gif_path = os.path.splitext(self.output_path)[0] + "_preview.gif"
-
-        # Open the output video
-        video = cv2.VideoCapture(self.output_path)
-
-        if not video.isOpened():
-            print("Error: Could not open output video.")
-            return None
-
-        # Get video properties
-        fps = video.get(cv2.CAP_PROP_FPS)
-        frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        # Calculate frames to include in GIF
-        frames_for_gif = min(int(duration * fps), frame_count)
-
-        # Sample frames for GIF
-        frames = []
-        sampling_step = max(1, frame_count // (frames_for_gif))
-
-        for i in range(0, frame_count, sampling_step):
-            if len(frames) >= frames_for_gif:
-                break
-
-            video.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = video.read()
-
-            if not ret:
-                break
-
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Resize for GIF (smaller file size)
-            height, width = frame_rgb.shape[:2]
-            new_width = min(width, 480)
-            new_height = int(height * (new_width / width))
-            frame_rgb = cv2.resize(frame_rgb, (new_width, new_height))
-
-            frames.append(frame_rgb)
-
-        video.release()
-
-        if not frames:
-            print("Error: No frames could be read from the video.")
-            return None
-
-        # Create GIF
-        print(f"Creating preview GIF with {len(frames)} frames...")
-        imageio.mimsave(gif_path, frames, duration=0.1)  # 10 FPS
-
-        print(f"Preview GIF saved to {gif_path}")
-        return gif_path
+            print(f"Error during video and audio merging: {e}")
+            return False
 
 
 def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Generate lip animation from text with speech')
-    parser.add_argument('--video', required=True, help='Path to input video with a person')
-    parser.add_argument('--visemes', required=True, help='Path to folder containing viseme images')
-    parser.add_argument('--text', required=True, help='Text to animate and speak')
-    parser.add_argument('--output', default='animated_speech.mp4', help='Output video path')
-    parser.add_argument('--wpm', type=int, default=150, help='Words per minute speaking rate')
-    parser.add_argument('--preview', action='store_true', help='Create a preview GIF')
+    """
+    Main function to run the lip sync animation.
+    Uses silence.mp4 as the base video and overlays viseme mouth images during speech parts.
+    During silent gaps in the audio, it shows the original silence.mp4 frames only.
+    """
+    # Initialize the LipSyncAnimator
+    input_video = "silence.mp4"  # The video of the person without sound
+    audio_file = "ashish_audio.wav"  # The audio file that will sync to the video
+    viseme_folder = "visemes"  # Folder containing subfolders for each viseme
+    output_video = "lip_sync_output.mp4"  # Final output video file
+    predictor_path = "shape_predictor_68_face_landmarks.dat"  # Path to dlib's face predictor model
 
-    args = parser.parse_args()
+    print("Starting lip sync animation process...")
+    print(f"Using input video: {input_video}")
+    print(f"Using audio file: {audio_file}")
+    print(f"Using viseme folder: {viseme_folder}")
+    print(f"Using facial landmark predictor: {predictor_path}")
+    print(f"Output will be saved to: {output_video}")
 
-    # Create the animator
-    animator = TextToLipAnimation(
-        input_video_path=args.video,
-        viseme_folder=args.visemes,
-        output_path=args.output
-    )
+    try:
+        # Create the animator with dlib facial landmark detector
+        animator = LipSyncAnimator(
+            input_video,
+            audio_file,
+            viseme_folder,
+            output_video,
+            predictor_path
+        )
 
-    # Animate from text with speech
-    success = animator.animate_from_text(args.text, words_per_minute=args.wpm)
+        # Extract the transcript from the audio file
+        print("Extracting transcript from audio...")
+        transcript_text = animator.extract_audio_transcript()
 
-    if success and args.preview:
-        animator.create_preview_gif()
+        if not transcript_text:
+            # If speech recognition fails, use a fallback transcript
+            print("Speech recognition failed. Using fallback transcript...")
+            transcript_text = "thank you for contacting us all lines are currently busy you call is very important to us"
+        else:
+            print(f"Successfully extracted transcript: '{transcript_text}'")
+
+        # Extract phoneme timings and corresponding visemes
+        print("Extracting phoneme timings...")
+        phoneme_timing = animator.extract_phoneme_timing(transcript_text)
+        print(f"Generated {len(phoneme_timing)} phoneme timing entries")
+
+        # Generate the lip-sync video (with viseme overlays)
+        print("Generating lip-sync video with viseme overlays...")
+        if animator.generate_video_from_visemes(phoneme_timing):
+            print("Lip-sync video generated successfully!")
+
+            # Merge the video with the original audio
+            print("Merging video with audio...")
+            if animator.merge_video_and_audio():
+                print("Lip sync video created successfully!")
+                print(f"Final video saved as final_{output_video}")
+            else:
+                print("Error: Failed to merge video and audio.")
+        else:
+            print("Error: Failed to generate lip-sync video.")
+
+    except Exception as e:
+        print(f"An error occurred during the lip sync process: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
