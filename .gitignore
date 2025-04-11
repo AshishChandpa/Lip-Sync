@@ -79,6 +79,7 @@ target/
 .ipynb_checkpoints
 */visemes/*
 visemes/*
+deserialise_approach/visemes/*
 # IPython
 profile_default/
 ipython_config.py
